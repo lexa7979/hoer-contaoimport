@@ -11,7 +11,7 @@ class Plugin implements BundlePluginInterface
     public function getBundles(ParserInterface $parser)
     {
         return [
-            BundleConfig::create('HoerElectronic\ContaoImportBundle\HoerContaoImportBundle')
+            BundleConfig::create('HoerElectronic\ContaoImportBundle\HoerElectronicContaoImportBundle')
                 ->setLoadAfter([
 					'Contao\CoreBundle\ContaoCoreBundle',
 					'Contao\ManagerBundle\ContaoManagerBundle'
