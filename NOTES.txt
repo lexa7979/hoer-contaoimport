@@ -1,0 +1,45 @@
+
+Initial setup taken from:
+* https://docs.contao.ninja/de/vortrag-composer-c3-c4-bundle.html
+* https://www.cyberspectrum.de/files/downloads/talks/c4extension_cnt2017.pdf (https://www.youtube.com/watch?v=34R7buoM_cc)
+
+composer install --optimize-autoloader
+
+#########################################
+
+DCA-Array - $GLOBALS['TL_DCA'][<Tabellenname>]
+
+	'config'						=> 
+	'list'	=> 'sorting'			=> 
+	'list'	=> 'label'				=> 
+	'list'	=> 'global_operations'	=> 
+	'list'	=> 'operations'			=> 
+	'palettes'						=> 
+	'subpalettes'					=> 
+	'fields'						=> Beschreibung der Tabellenstruktur (SQL-Design, Pflichtfelder)
+
+ - https://docs.contao.org/books/api/dca/reference.html
+ - https://docs.contao.org/books/api/dca/palettes.html
+
+#############################################
+
+Beispiel: "contao/faq-bundle"
+
+##############################################
+
+Model - Entity - Collection
+	(https://docs.contao.org/books/cookbook/de/Models.html)
+	Ein Model repräsentiert einen Datensatz aus einer Tabelle (Entität).
+	Models bieten einen Objekt-orientierten Zugriff auf Tabellen und ersetzen damit SQL- Statements weitgehend.
+	Darüber hinaus bieten sie viele weitere Vorteile. Mehrere Models werden durch eine Collection referenziert,
+	dies entspricht einer SQL-Abfrage, die mehr als eine Ergebniszeile liefert.
+	Contao 3 bietet - wenn dem Model eine DCA-Struktur zugeordnet ist - außerdem die Möglichkeit,
+	referenzierte Datensätze automatisch zu laden. Beispielsweise den Author (UserModel) eines Artikels (ArticleModel).
+	/src/Resources/models
+
+Frontend-Module
+	/src/Resources/modules
+
+Hooks
+	???
+

@@ -23,7 +23,7 @@
 	},
 	"autoload": {
 		"psr-4": {
-			"Hoer\\ContaoImportBundle\\": "src/"
+			"HoerElectronic\\ContaoImportBundle\\": "src/"
 		},
 		"classmap": [
 			"src/Resources/contao/"
@@ -37,7 +37,7 @@
 	},
 	"autoload-dev": {
 		"psr-4": {
-			"Hoer\\ContaoImportBundle\\Test\\": "tests/"
+			"HoerElectronic\\ContaoImportBundle\\Test\\": "tests/"
 		}
 	},
 	"extra": {
@@ -52,6 +52,6 @@
 				"languages_tx": ".tx"
 			}
 		},
-		"contao-manager-plugin": "Hoer\\ContaoImportBundle\\ContaoManager\\Plugin"
+		"contao-manager-plugin": "HoerElectronic\\ContaoImportBundle\\ContaoManager\\Plugin"
 	}
 }
