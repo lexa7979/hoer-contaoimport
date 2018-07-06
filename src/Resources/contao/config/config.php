@@ -1,7 +1,5 @@
 <?php
 
-var_dump("Hallo lexA!"); exit;
-
 // Add back end modules
 if (! array_key_exists('hoer', $GLOBALS['BE_MOD']))
 	array_insert($GLOBALS['BE_MOD'], 1, array('hoer' => array()));
