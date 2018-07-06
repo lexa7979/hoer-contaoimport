@@ -6,7 +6,7 @@ if (! array_key_exists('hoer', $GLOBALS['BE_MOD']))
 
 array_insert($GLOBALS['BE_MOD']['hoer'], 1, array(
     'export' => array(
-        'callback'          => 'HoerElectronic\ContaoImport\ExportPage',//'Isotope\BackendModule\Setup',
+        'callback'          => 'HoerElectronic\ContaoImport\Export',
         'tables'            => array(),
         'icon'              => 'system/modules/isotope/assets/images/application-monitor.png',
         'javascript'        => 'system/modules/isotope/assets/js/backend.js',
@@ -15,7 +15,7 @@ array_insert($GLOBALS['BE_MOD']['hoer'], 1, array(
 
 if (array_key_exists('ISO_MOD', $GLOBALS) && array_key_exists('miscellaneous:hide', $GLOBALS['ISO_MOD']))
 	$GLOBALS['ISO_MOD']['miscellaneous:hide']['export'] = array(
-		'callback'			=> '',
+		'callback'			=> 'HoerElectronic\ContaoImport\Export',
 		'icon'              => 'system/modules/isotope/assets/images/setup-integrity.png'
 	);
 // (
