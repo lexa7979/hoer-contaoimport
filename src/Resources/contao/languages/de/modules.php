@@ -3,10 +3,7 @@
 $item_group = [
 	'MOD' => [
 		'hoer'				=> ['Zusatzfunktionen',		'Zusatzfunktionen'],
-		'export'			=> ['Daten exportieren',	'Daten exportieren'],
-		// 'teachers'		=> ['Lehrer',		'Tanzlehrer verwalten'],
-		// 'styles'		=> ['Tanzstile',	'Tanzstile verwalten'],
-		// 'courses'		=> ['Kurse',		'Tanzkurse verwalten'],
+		'hoer_export'		=> ['Shop-Export',	'Shopdaten exportieren'],
 	],
 	// 'FMD' => [
 	// 	'timetableview'	=> ['Kursplan',		'Fügt der Seite einen Kursplan hinzu.'],

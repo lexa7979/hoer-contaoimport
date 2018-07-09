@@ -9,13 +9,229 @@ namespace HoerElectronic\ContaoImport;
  */
 class Export extends \BackendModule {
 
+	protected $xml_writer = null;
+
+	protected $types = null;
+	protected $groups = null;
+	protected $files = null;
+
+	protected static $db_isotope = [
+		'id',
+		'pid',
+		'gid',
+		'tstamp',
+		'dateAdded',
+		'type',
+		'published',
+	];
+
+	protected static function compileIdentifier($data) {
+
+		$a = array(
+			'key'	=> 'missing',
+			'value'	=> ''
+		);
+
+		if (! is_array($data))
+			return $a;
+
+		foreach (array('sku', 'name', 'alias') as $key) {
+			$value = (array_key_exists($key, $data)) ? $data[$key] : '';
+			if (! static::convertData($key, $value))
+				continue;
+			$a['key'] = $key;
+			$a['value'] = $value;
+			break;
+		}
+
+		return $a;
+	}
+
+	protected function convertData($key, $value) {
+
+		if (! $value || $value == 'a:0:{}' || array_search($key, static::$db_isotope) !== FALSE)
+			return '';
+
+		$a = unserialize($value);
+		if ($a !== FALSE)
+			$value = $a;
+
+		switch ($key) {
+
+			case 'shipping_weight':
+				if (is_array($value) && count($value) == 2 && $value[0] == '' && $value[1] == 'kg')
+					return '';
+				break;
+
+			case 'shipping_price':
+				if ($value == '0.00')
+					return '';
+				break;
+
+			case 'download':
+			case 'download_order':
+				if (! is_array($value))
+					return '';
+				foreach ($value as $k => $v) {
+					$value[$k] = $this->getFile($v);
+					// $file = $this->Database->prepare("SELECT path, name FROM tl_files WHERE uuid = ?")->execute($v)->next();
+					// if ($file) {
+					// 	$value[$k] = [
+					// 		'filepath'	=> $file->path,
+					// 		'filename'	=> $file->name
+					// 	];
+					// }
+					// else {
+					// 	$value[$k] = "contao-UUID:0x" . bin2hex($v);
+					// }
+				}
+				return $value;
+		}
+
+		return $value;
+	}
+
+	protected function writeXmlValue($key, $attributes_array, $value) {
+
+		if (! is_array($attributes_array))
+			$attributes_array = [];
+
+		if (is_array($value)) {
+			if (! count($value))
+				return;
+			$this->xml_writer->startElementNS('hoer', $key, null);
+			foreach ($attributes_array as $k => $v)
+				$this->xml_writer->writeAttribute($k, $v);
+			foreach ($value as $k => $v) {
+				if (is_integer($k))
+					$this->writeXmlValue('item', ['index' => $k], $v);
+				else
+					$this->writeXmlValue($k, [], $v);
+			}
+			$this->xml_writer->endElement();
+		}
+		else {
+			if (! $value)
+				return;
+			$this->xml_writer->startElementNS('hoer', $key, null);
+			foreach ($attributes_array as $k => $v)
+				$this->xml_writer->writeAttribute($k, $v);
+			$this->xml_writer->text($value);
+			$this->xml_writer->endElement();
+		}
+	}
+
+	protected function getProductType($type_id) {
+
+		if (! $type_id)
+			return '';
+
+		if (! $this->types) {
+			$this->types = [];
+			$res = $this->Database->prepare("SELECT id, name FROM tl_iso_producttype")->execute();
+			while ($data = $res->next())
+				$this->types[$data->id] = $data->name;
+		}
+
+		return (array_key_exists($type_id, $this->types)) ? $this->types[$type_id] : '';
+	}
+
+	protected function getGroup($group_id) {
+
+		if (! $group_id)
+			return '';
+
+		if (! $this->groups) {
+			$this->groups = [];
+			$res = $this->Database->prepare("SELECT id, name FROM tl_iso_group")->execute();
+			while ($data = $res->next())
+				$this->groups[$data->id] = $data->name;
+		}
+
+		return (array_key_exists($group_id, $this->groups)) ? $this->groups[$group_id] : '';
+	}
+
+	protected function getFile($binary_uuid) {
+
+		if (! $binary_uuid)
+			return '';
+
+		$uuid = bin2hex($binary_uuid);
+
+		if (! $this->files)
+			$this->files = [];
+	
+		if (! array_key_exists($uuid, $this->files)) {
+			$res = $this->Database->prepare("SELECT path, name FROM tl_files WHERE uuid = ?")->execute($binary_uuid);
+			$data = $res->next();
+			$this->files[$uuid] = ($data) ? ['filepath' => $data->path, 'filename' => $data->name] : "Contao-UUID:0x$uuid";
+		}
+
+		return $this->files[$uuid];
+	}
+
 	public function generate() {
 
-		return "<div>Hallo lexA!</div>";
+		header('Content-Type: application/xml');
+		header('Content-Disposition: inline; filename="isotope.xml"');
+
+		$this->xml_writer = new \XMLWriter();
+		$this->xml_writer->openURI('php://output');
+
+		$this->xml_writer->setIndent(true);
+		$this->xml_writer->startDocument('1.0', 'UTF-8');
+		$this->xml_writer->startElementNS('hoer', 'product-list', 'http://hoer-electronic.de/hoer-contaoimport.xls');
+
+		$products = $this->Database->prepare("SELECT * FROM tl_iso_product p WHERE NOT p.pid > 0 ORDER BY id")->execute();
+		while ($p_data = $products->next()) {
+			//
+			$p_data = $p_data->row();
+			$ident_array = static::compileIdentifier($p_data);
+			// Look for product's variants:
+			$v_data = $this->Database->prepare("SELECT * FROM tl_iso_product p WHERE p.pid = ? ORDER BY id")->execute($p_data['id']);
+			$variants = [];
+			while ($v = $v_data->next())
+				$variants[] = $v->row();
+			//
+			for ($i = -1; $i < count($variants); $i++) {
+				// Get data of current product:
+				$row = ($i == -1) ? $p_data : $variants[$i];
+				// Open new XML-range for current product:
+				$this->xml_writer->startElementNS('hoer', 'product', null);
+				if ($ident_array['value'])
+					$this->xml_writer->writeAttribute('id', $ident_array['value']);
+				$this->xml_writer->writeAttribute('id-type', $ident_array['key']);
+				if ($i >= 0)
+					$this->xml_writer->writeAttribute('variant-index', $i);
+				// Memorise some structural data connected to Isotope's database:
+				$isotope_data = [];
+				foreach (static::$db_isotope as $k)
+					$isotope_data[$k] = $row[$k];
+				$this->writeXmlValue('isotope-data', [], $isotope_data);
+				//
+				if ($i == -1) {
+					$this->writeXmlValue('producttype', [], $this->getProductType($p_data['type']));
+					$this->writeXmlValue('group', [], $this->getGroup($p_data['gid']));
+				}
+				// 
+				foreach ($row as $key => $value) {
+					if ($key == $ident_array['key'])
+						continue;
+					$this->writeXmlValue($key, [], $this->convertData($key, $value));
+				}
+				//
+				$this->xml_writer->endElement();
+			}
+		}
+
+		$this->xml_writer->endElement();
+		$this->xml_writer->flush();
+		exit;
 	}
 
 	protected function compile() {
 
+		return '';
 	}
 }
 
