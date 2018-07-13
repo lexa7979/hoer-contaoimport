@@ -2,19 +2,29 @@
 
 namespace HoerElectronic\ContaoImport;
 
-/**
- * Class Integrity
- *
- * @property \Template|object Template
- */
+/***
+ * 
+ * 
+ * 
+ ***/
 class Export extends \BackendModule {
 
+	/*
+	 * 
+	 */
 	protected $xml_writer = null;
 
-	protected $types = null;
-	protected $groups = null;
-	protected $files = null;
+	/*
+	 * 
+	 */
+	protected $types_cache = null;
+	protected $groups_cache = null;
+	protected $files_cache = null;
+	protected $pages_cache = null;
 
+	/*
+	 * 
+	 */
 	protected static $db_isotope = [
 		'id',
 		'pid',
@@ -22,98 +32,127 @@ class Export extends \BackendModule {
 		'tstamp',
 		'dateAdded',
 		'type',
+		'orderPages',
 		'published',
 	];
 
-	protected static function compileIdentifier($data) {
+	/**
+	 * 
+	 * 
+	 * @param	array	$data
+	 * 
+	 * @return	array	
+	 **/
+	protected function compileIdentifier($data) {
 
-		$a = array(
-			'key'	=> 'missing',
-			'value'	=> ''
-		);
-
-		if (! is_array($data))
-			return $a;
-
-		foreach (array('sku', 'name', 'alias') as $key) {
-			$value = (array_key_exists($key, $data)) ? $data[$key] : '';
-			if (! static::convertData($key, $value))
-				continue;
-			$a['key'] = $key;
-			$a['value'] = $value;
-			break;
+		if (is_array($data)) foreach (array('sku', 'name', 'alias') as $key) {
+			$b = (array_key_exists($key, $data)) ? $this->convertData([$key, $data[$key]]) : null;
+			if ($b && is_array($b) && count($b) == 2)
+				return $b;
 		}
 
-		return $a;
+		return ['missing', null];
 	}
 
-	protected function convertData($key, $value) {
+	/**
+	 * Internally used function to prepare the data (e.g. 'MLT 5') of one field (e.g. 'name')
+	 * from Isotope's table 'tl_iso_product' to be exported to XML.
+	 * 
+	 * If the given data was serialised before (e.g. into 'a:0:{}'), it will be unserialised now (e.g. into an array).
+	 * 
+	 * @param	array	$key_and_value	Array with two items:
+	 * 		$key_and_value[0] - Name of the database-field where the data comes from
+	 * 		$key_and_value[1] - Data of the database-field to be modified if needed
+	 * 
+	 * @return	array|null	- Array with two items:
+	 * 		$res[0]: Name of the given database-field, maybe changed
+	 * 		$res[1]: Data of the given database-field, maybe changed
+	 * 		- Null is returned in case of faulty data or data that shall not automatically be included into XML.
+	 **/
+	protected function convertData($key_and_value) {
 
-		if (! $value || $value == 'a:0:{}' || array_search($key, static::$db_isotope) !== FALSE)
-			return '';
+		// Read arguments which are given as an array:
+		if (! is_array($key_and_value) || count($key_and_value) != 2 || ! is_scalar($key_and_value[0]))
+			return null;
+		$key = $key_and_value[0];
+		$value = $key_and_value[1];
 
-		$a = unserialize($value);
-		if ($a !== FALSE)
-			$value = $a;
+		// Recognise serialised values:
+		$v = unserialize($value);
+		if ($v !== FALSE)
+			$value = $v;
 
+		// Skip empty fields:
+		if (! $value || (is_array($value) && ! count($value))) {
+			return null;
+		}
+
+		// Convert data if needed:
 		switch ($key) {
 
+			case 'download_order':	return null;
+
+			case 'producttype':		$value = $this->getProductType($value);		break;
+			case 'group':			$value = $this->getGroup($value);			break;
+			case 'categories':		$value = $this->getPages($value);			break;
+
 			case 'shipping_weight':
+				// Skip if value equals ['', 'kg']:
 				if (is_array($value) && count($value) == 2 && $value[0] == '' && $value[1] == 'kg')
-					return '';
+					return null;
 				break;
 
 			case 'shipping_price':
 				if ($value == '0.00')
-					return '';
+					return null;
 				break;
 
 			case 'download':
-			case 'download_order':
 				if (! is_array($value))
-					return '';
-				foreach ($value as $k => $v) {
+					return null;
+				foreach ($value as $k => $v)
 					$value[$k] = $this->getFile($v);
-					// $file = $this->Database->prepare("SELECT path, name FROM tl_files WHERE uuid = ?")->execute($v)->next();
-					// if ($file) {
-					// 	$value[$k] = [
-					// 		'filepath'	=> $file->path,
-					// 		'filename'	=> $file->name
-					// 	];
-					// }
-					// else {
-					// 	$value[$k] = "contao-UUID:0x" . bin2hex($v);
-					// }
-				}
-				return $value;
+				break;
 		}
 
-		return $value;
+		// Return pair of data:
+		return [$key, $value];
 	}
 
-	protected function writeXmlValue($key, $attributes_array, $value) {
+	/**
+	 * 
+	 * 
+	 **/
+	protected function writeXmlValue($key_and_value, $attributes_array = null) {
 
+		// Read the given pair of data:
+		if (! is_array($key_and_value) || count($key_and_value) != 2 || ! is_scalar($key_and_value[0]))
+			return;
+		$key = $key_and_value[0];
+		$value = $key_and_value[1];
+
+		// Ensure that attributes are given as an array:
 		if (! is_array($attributes_array))
 			$attributes_array = [];
 
 		if (is_array($value)) {
 			if (! count($value))
 				return;
-			$this->xml_writer->startElementNS('hoer', $key, null);
+			$this->xml_writer->startElementNS('isotope', $key, null);
 			foreach ($attributes_array as $k => $v)
 				$this->xml_writer->writeAttribute($k, $v);
 			foreach ($value as $k => $v) {
 				if (is_integer($k))
-					$this->writeXmlValue('item', ['index' => $k], $v);
+					$this->writeXmlValue(['item', $v], ['index' => $k]);
 				else
-					$this->writeXmlValue($k, [], $v);
+					$this->writeXmlValue([$k, $v]);
 			}
 			$this->xml_writer->endElement();
 		}
 		else {
 			if (! $value)
 				return;
-			$this->xml_writer->startElementNS('hoer', $key, null);
+			$this->xml_writer->startElementNS('isotope', $key, null);
 			foreach ($attributes_array as $k => $v)
 				$this->xml_writer->writeAttribute($k, $v);
 			$this->xml_writer->text($value);
@@ -121,55 +160,112 @@ class Export extends \BackendModule {
 		}
 	}
 
+	/**
+	 * 
+	 * 
+	 **/
 	protected function getProductType($type_id) {
 
 		if (! $type_id)
-			return '';
+			return null;
 
-		if (! $this->types) {
-			$this->types = [];
+		if (! $this->types_cache) {
+			$this->types_cache = [];
 			$res = $this->Database->prepare("SELECT id, name FROM tl_iso_producttype")->execute();
 			while ($data = $res->next())
-				$this->types[$data->id] = $data->name;
+				$this->types_cache[$data->id] = $data->name;
 		}
 
-		return (array_key_exists($type_id, $this->types)) ? $this->types[$type_id] : '';
+		return (array_key_exists($type_id, $this->types_cache)) ? $this->types_cache[$type_id] : '';
 	}
 
+	/**
+	 * 
+	 * 
+	 **/
 	protected function getGroup($group_id) {
 
 		if (! $group_id)
-			return '';
+			return null;
 
-		if (! $this->groups) {
-			$this->groups = [];
+		if (! $this->groups_cache) {
+			$this->groups_cache = [];
 			$res = $this->Database->prepare("SELECT id, name FROM tl_iso_group")->execute();
 			while ($data = $res->next())
-				$this->groups[$data->id] = $data->name;
+				$this->groups_cache[$data->id] = $data->name;
 		}
 
-		return (array_key_exists($group_id, $this->groups)) ? $this->groups[$group_id] : '';
+		return (array_key_exists($group_id, $this->groups_cache)) ? $this->groups_cache[$group_id] : null;
 	}
 
+	/**
+	 * 
+	 * 
+	 **/
 	protected function getFile($binary_uuid) {
 
 		if (! $binary_uuid)
-			return '';
+			return null;
 
 		$uuid = bin2hex($binary_uuid);
 
-		if (! $this->files)
-			$this->files = [];
+		if (! $this->files_cache)
+			$this->files_cache = [];
 	
-		if (! array_key_exists($uuid, $this->files)) {
+		if (! array_key_exists($uuid, $this->files_cache)) {
 			$res = $this->Database->prepare("SELECT path, name FROM tl_files WHERE uuid = ?")->execute($binary_uuid);
 			$data = $res->next();
-			$this->files[$uuid] = ($data) ? ['filepath' => $data->path, 'filename' => $data->name] : "Contao-UUID:0x$uuid";
+			$this->files_cache[$uuid] = ($data) ? ['filepath' => $data->path, 'filename' => $data->name] : "Contao-UUID:0x$uuid";
 		}
 
-		return $this->files[$uuid];
+		return $this->files_cache[$uuid];
 	}
 
+	/**
+	 * 
+	 * 
+	 * 
+	 * @param	integer|array	$page_ids
+	 * 
+	 * @return	null|array
+	 **/
+	protected function getPages($page_ids) {
+
+		if (! $page_ids)
+			return null;
+
+		if (! is_array($page_ids)) {
+
+			if (! $this->pages_cache)
+				$this->pages_cache = [];
+
+			if (! array_key_exists($page_ids, $this->pages_cache)) {
+				$res = $this->Database->prepare("SELECT alias FROM tl_page WHERE id = ?")->execute($page_ids);
+				$data = $res->next();
+				$this->pages_cache[$page_ids] = ($data) ? ['alias' => $data->alias] : null;
+			}
+
+			return $this->pages_cache[$page_ids];
+		}
+		else {
+
+			$a = [];
+			foreach ($page_ids as $key => $id) {
+				$p = $this->getPages($id);
+				if ($p)
+					$a[$key] = $p;
+			}
+
+			return (count($a)) ? $a : null;
+		}
+
+
+	}
+
+	/**
+	 * 
+	 * 
+	 **/
 	public function generate() {
 
 		header('Content-Type: application/xml');
@@ -180,13 +276,14 @@ class Export extends \BackendModule {
 
 		$this->xml_writer->setIndent(true);
 		$this->xml_writer->startDocument('1.0', 'UTF-8');
-		$this->xml_writer->startElementNS('hoer', 'product-list', 'http://hoer-electronic.de/hoer-contaoimport.xls');
+		$this->xml_writer->startElementNS('isotope', 'product-list', 'http://hoer-electronic.de');
 
 		$products = $this->Database->prepare("SELECT * FROM tl_iso_product p WHERE NOT p.pid > 0 ORDER BY id")->execute();
 		while ($p_data = $products->next()) {
 			//
 			$p_data = $p_data->row();
-			$ident_array = static::compileIdentifier($p_data);
+			// $ident_array = static::compileIdentifier($p_data);
+			$ident = $this->compileIdentifier($p_data);
 			// Look for product's variants:
 			$v_data = $this->Database->prepare("SELECT * FROM tl_iso_product p WHERE p.pid = ? ORDER BY id")->execute($p_data['id']);
 			$variants = [];
@@ -197,27 +294,31 @@ class Export extends \BackendModule {
 				// Get data of current product:
 				$row = ($i == -1) ? $p_data : $variants[$i];
 				// Open new XML-range for current product:
-				$this->xml_writer->startElementNS('hoer', 'product', null);
-				if ($ident_array['value'])
-					$this->xml_writer->writeAttribute('id', $ident_array['value']);
-				$this->xml_writer->writeAttribute('id-type', $ident_array['key']);
+				$this->xml_writer->startElementNS('isotope', 'product', null);
+				if ($ident[1])
+					$this->xml_writer->writeAttribute('id', $ident[1]);
+				$this->xml_writer->writeAttribute('id-type', $ident[0]);
 				if ($i >= 0)
 					$this->xml_writer->writeAttribute('variant-index', $i);
 				// Memorise some structural data connected to Isotope's database:
-				$isotope_data = [];
-				foreach (static::$db_isotope as $k)
-					$isotope_data[$k] = $row[$k];
-				$this->writeXmlValue('isotope-data', [], $isotope_data);
+				$this->xml_writer->startElementNS('isotope', 'contao-data', null);
+				foreach (static::$db_isotope as $key) {
+					if (array_key_exists($key, $row))
+						$this->writeXmlValue($this->convertData([$key, $row[$key]]));
+				}
+				$this->xml_writer->endElement();
 				//
 				if ($i == -1) {
-					$this->writeXmlValue('producttype', [], $this->getProductType($p_data['type']));
-					$this->writeXmlValue('group', [], $this->getGroup($p_data['gid']));
+					foreach (['type' => 'producttype', 'gid' => 'group', 'orderPages' => 'categories'] as $key1 => $key2) {
+						if (array_key_exists($key1, $row))
+							$this->writeXmlValue($this->convertData([$key2, $row[$key1]]));
+					}
 				}
 				// 
 				foreach ($row as $key => $value) {
-					if ($key == $ident_array['key'])
+					if ($key == $ident[0] || array_search($key, static::$db_isotope) !== FALSE)
 						continue;
-					$this->writeXmlValue($key, [], $this->convertData($key, $value));
+					$this->writeXmlValue($this->convertData([$key, $value]));
 				}
 				//
 				$this->xml_writer->endElement();
@@ -229,446 +330,12 @@ class Export extends \BackendModule {
 		exit;
 	}
 
+	/**
+	 * 
+	 * 
+	 **/
 	protected function compile() {
 
 		return '';
 	}
 }
-
-
-
-
-
-// <?php
-
-// /**
-//  * Isotope eCommerce for Contao Open Source CMS
-//  *
-//  * Copyright (C) 2009-2016 terminal42 gmbh & Isotope eCommerce Workgroup
-//  *
-//  * @link       https://isotopeecommerce.org
-//  * @license    https://opensource.org/licenses/lgpl-3.0.html
-//  */
-
-// namespace Isotope\BackendModule;
-
-// use Isotope\Interfaces\IsotopeIntegrityCheck;
-
-
-// /**
-//  * Class Integrity
-//  *
-//  * @property \Template|object Template
-//  */
-// class Integrity extends \BackendModule
-// {
-
-//     /**
-//      * Template
-//      * @var string
-//      */
-//     protected $strTemplate = 'be_iso_integrity';
-
-//     /**
-//      * Generate the module
-//      * @return string
-//      */
-//     public function generate()
-//     {
-//         if (!\BackendUser::getInstance()->isAdmin) {
-//             return '<p class="tl_gerror">'.$GLOBALS['TL_LANG']['tl_iso_integrity']['permission'].'</p>';
-//         }
-
-//         \System::loadLanguageFile('tl_iso_integrity');
-
-//         return parent::generate();
-//     }
-
-//     /**
-//      * Generate the module
-//      */
-//     protected function compile()
-//     {
-//         /** @var IsotopeIntegrityCheck[] $arrChecks */
-//         $arrChecks = array();
-//         $arrTasks = array();
-//         $blnReload = false;
-
-//         if ('tl_iso_integrity' === \Input::post('FORM_SUBMIT')) {
-//             $arrTasks = (array) \Input::post('tasks');
-//         }
-
-//         $this->Template->hasFixes = false;
-
-//         foreach ($GLOBALS['ISO_INTEGRITY'] as $strClass) {
-
-//             /** @var IsotopeIntegrityCheck $objCheck */
-//             $objCheck = new $strClass();
-
-//             if (!($objCheck instanceof IsotopeIntegrityCheck)) {
-//                 throw new \LogicException('Class "' . $strClass . '" must implement IsotopeIntegrityCheck interface');
-//             }
-
-//             if (in_array($objCheck->getId(), $arrTasks) && $objCheck->hasError() && $objCheck->canRepair()) {
-
-//                 $objCheck->repair();
-//                 $blnReload = true;
-
-//             } else {
-
-//                 $blnError = $objCheck->hasError();
-//                 $blnRepair = $objCheck->canRepair();
-
-//                 $arrChecks[] = [
-//                     'id'          => $objCheck->getId(),
-//                     'name'        => $objCheck->getName(),
-//                     'description' => $objCheck->getDescription(),
-//                     'error'       => $blnError,
-//                     'repair'      => $blnError && $blnRepair,
-//                 ];
-
-//                 if ($blnError && $blnRepair) {
-//                     $this->Template->hasFixes = true;
-//                 }
-//             }
-//         }
-
-//         if ($blnReload) {
-//             \Controller::reload();
-//         }
-
-//         $this->Template->checks = $arrChecks;
-//         $this->Template->action = \Environment::get('request');
-//         $this->Template->back = str_replace('&mod=integrity', '', \Environment::get('request'));
-//     }
-// }
-
-
-
-
-
-
-
-// <?php
-
-// /**
-//  * Isotope eCommerce for Contao Open Source CMS
-//  *
-//  * Copyright (C) 2009-2016 terminal42 gmbh & Isotope eCommerce Workgroup
-//  *
-//  * @link       https://isotopeecommerce.org
-//  * @license    https://opensource.org/licenses/lgpl-3.0.html
-//  */
-
-// namespace Isotope\BackendModule;
-
-// /**
-//  * Class ModuleIsotopeSetup
-//  *
-//  * Back end module Isotope "setup".
-//  * @copyright  Isotope eCommerce Workgroup 2009-2012
-//  * @author     Andreas Schempp <andreas.schempp@terminal42.ch>
-//  * @author     Fred Bliss <fred.bliss@intelligentspark.com>
-//  */
-// class Setup extends BackendOverview
-// {
-//     /**
-//      * {@inheritdoc}
-//      */
-//     protected function getModules()
-//     {
-//         $return = [];
-
-//         $this->addIntroduction($return);
-
-//         foreach ($GLOBALS['ISO_MOD'] as $strGroup => $arrModules) {
-//             foreach ($arrModules as $strModule => $arrConfig) {
-
-//                 if ($this->checkUserAccess($strModule)) {
-//                     if (is_array($arrConfig['tables'])) {
-//                         $GLOBALS['BE_MOD']['isotope']['iso_setup']['tables'] += $arrConfig['tables'];
-//                     }
-
-//                     $return[$strGroup]['modules'][$strModule] = array_merge($arrConfig, array
-//                     (
-//                         'label'         => specialchars($GLOBALS['TL_LANG']['IMD'][$strModule][0] ?: $strModule),
-//                         'description'   => specialchars(strip_tags($GLOBALS['TL_LANG']['IMD'][$strModule][1])),
-//                         'href'          => TL_SCRIPT . '?do=iso_setup&mod=' . $strModule,
-//                         'class'         => $arrConfig['class'],
-//                     ));
-
-//                     $strLabel = str_replace(':hide', '', $strGroup);
-//                     $return[$strGroup]['label'] = $GLOBALS['TL_LANG']['IMD'][$strLabel] ?: $strLabel;
-//                 }
-//             }
-//         }
-
-//         return $return;
-//     }
-
-//     /**
-//      * {@inheritdoc}
-//      */
-//     protected function checkUserAccess($module)
-//     {
-//         return \BackendUser::getInstance()->isAdmin || \BackendUser::getInstance()->hasAccess($module, 'iso_modules');
-//     }
-
-
-//     /**
-//      * Adds first steps and fundraising hints
-//      *
-//      * @param array $return
-//      */
-//     protected function addIntroduction(array &$return)
-//     {
-//         if (\BackendUser::getInstance()->isAdmin) {
-//             $objTemplate = new \BackendTemplate('be_iso_introduction');
-
-//             $return['introduction']['label'] = &$GLOBALS['TL_LANG']['MSC']['isotopeIntroductionLegend'];
-//             $return['introduction']['html']  = $objTemplate->parse();
-//         }
-//     }
-// }
-
-
-
-
-
-// <?php
-
-// /**
-//  * Isotope eCommerce for Contao Open Source CMS
-//  *
-//  * Copyright (C) 2009-2016 terminal42 gmbh & Isotope eCommerce Workgroup
-//  *
-//  * @link       https://isotopeecommerce.org
-//  * @license    https://opensource.org/licenses/lgpl-3.0.html
-//  */
-
-// namespace Isotope\BackendModule;
-
-
-// abstract class BackendOverview extends \BackendModule
-// {
-
-//     /**
-//      * Template
-//      * @var string
-//      */
-//     protected $strTemplate = 'be_iso_overview';
-
-//     /**
-//      * Isotope modules
-//      * @var array
-//      */
-//     protected $arrModules = array();
-
-
-//     /**
-//      * Get modules
-//      * @return array
-//      */
-//     abstract protected function getModules();
-
-//     /**
-//      * Check if a user has access to the current module
-//      * @return boolean
-//      */
-//     abstract protected function checkUserAccess($module);
-
-
-//     /**
-//      * Generate the module
-//      * @return string
-//      */
-//     public function generate()
-//     {
-//         $this->arrModules = array();
-
-//         // enable collapsing legends
-//         $session = \Session::getInstance()->get('fieldset_states');
-//         foreach ($this->getModules() as $k => $arrGroup) {
-//             list($k, $hide) = explode(':', $k, 2);
-
-//             if (isset($session['iso_be_overview_legend'][$k])) {
-//                 $arrGroup['collapse'] = !$session['iso_be_overview_legend'][$k];
-//             } elseif ('hide' === $hide) {
-//                 $arrGroup['collapse'] = true;
-//             }
-
-//             $this->arrModules[$k] = $arrGroup;
-//         }
-
-//         // Open module
-//         if (\Input::get('mod') != '') {
-//             return $this->getModule(\Input::get('mod'));
-//         } // Table set but module missing, fix the saveNcreate link
-//         elseif (\Input::get('table') != '') {
-//             foreach ($this->arrModules as $arrGroup) {
-//                 if (isset($arrGroup['modules'])) {
-//                     foreach ($arrGroup['modules'] as $strModule => $arrConfig) {
-//                         if (is_array($arrConfig['tables'])
-//                             && in_array(\Input::get('table'), $arrConfig['tables'], true)
-//                         ) {
-//                             \Controller::redirect(\Backend::addToUrl('mod=' . $strModule));
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-
-//         return parent::generate();
-//     }
-
-
-//     /**
-//      * Generate the module
-//      */
-//     protected function compile()
-//     {
-//         if (version_compare(VERSION, '4.0', '<')) {
-//             $versionClass = 'iso_backend3';
-//         } elseif (version_compare(VERSION, '4.2', '<')) {
-//             $versionClass = 'iso_backend42';
-//         } else {
-//             $versionClass = 'iso_backend44';
-//         }
-
-
-//         $this->Template->versionClass = $versionClass;
-//         $this->Template->modules = $this->arrModules;
-//     }
-
-
-//     /**
-//      * Open a module and return it as HTML
-//      * @param string
-//      * @return mixed
-//      */
-//     protected function getModule($module)
-//     {
-//         $arrModule = array();
-//         $dc = null;
-
-//         foreach ($this->arrModules as $arrGroup) {
-//             if (!empty($arrGroup['modules']) && array_key_exists($module, $arrGroup['modules'])) {
-//                 $arrModule =& $arrGroup['modules'][$module];
-//             }
-//         }
-
-//         // Check whether the current user has access to the current module
-//         if (!$this->checkUserAccess($module)) {
-//             \System::log('Module "' . $module . '" was not allowed for user "' . $this->User->username . '"', __METHOD__, TL_ERROR);
-//             \Controller::redirect('contao/main.php?act=error');
-//         }
-
-//         // Redirect the user to the specified page
-//         if ($arrModule['redirect'] != '') {
-//             \Controller::redirect($arrModule['redirect']);
-//         }
-
-//         $strTable = \Input::get('table');
-
-//         if ($strTable == '' && $arrModule['callback'] == '') {
-//             \Controller::redirect(\Backend::addToUrl('table=' . $arrModule['tables'][0]));
-//         }
-
-//         // Add module style sheet
-//         if (isset($arrModule['stylesheet'])) {
-//             $GLOBALS['TL_CSS'][] = $arrModule['stylesheet'];
-//         }
-
-//         // Add module javascript
-//         if (isset($arrModule['javascript'])) {
-//             $GLOBALS['TL_JAVASCRIPT'][] = $arrModule['javascript'];
-//         }
-
-//         // Redirect if the current table does not belong to the current module
-//         if ($strTable != '') {
-//             if (!in_array($strTable, (array) $arrModule['tables'], true)) {
-//                 \System::log('Table "' . $strTable . '" is not allowed in module "' . $module . '"', __METHOD__, TL_ERROR);
-//                 \Controller::redirect('contao/main.php?act=error');
-//             }
-
-//             // Load the language and DCA file
-//             \System::loadLanguageFile($strTable);
-//             \Controller::loadDataContainer($strTable);
-
-//             // Include all excluded fields which are allowed for the current user
-//             if ($GLOBALS['TL_DCA'][$strTable]['fields']) {
-//                 foreach ($GLOBALS['TL_DCA'][$strTable]['fields'] as $k => $v) {
-//                     if ($v['exclude'] && \BackendUser::getInstance()->hasAccess($strTable . '::' . $k, 'alexf')) {
-//                         $GLOBALS['TL_DCA'][$strTable]['fields'][$k]['exclude'] = false;
-//                     }
-//                 }
-//             }
-
-//             // Fabricate a new data container object
-//             if (!strlen($GLOBALS['TL_DCA'][$strTable]['config']['dataContainer'])) {
-//                 \System::log('Missing data container for table "' . $strTable . '"', __METHOD__, TL_ERROR);
-//                 trigger_error('Could not create a data container object', E_USER_ERROR);
-//             }
-
-//             $dataContainer = 'DC_' . $GLOBALS['TL_DCA'][$strTable]['config']['dataContainer'];
-//             $dc            = new $dataContainer($strTable);
-//         }
-
-//         // AJAX request
-//         if ($_POST && \Environment::get('isAjaxRequest')) {
-//             $this->objAjax->executePostActions($dc);
-//         }
-
-//         // Call module callback
-//         elseif (class_exists($arrModule['callback'])) {
-
-//             /** @var \BackendModule $objCallback */
-//             $objCallback = new $arrModule['callback']($dc, $arrModule);
-
-//             return $objCallback->generate();
-//         }
-
-//         // Custom action (if key is not defined in config.php the default action will be called)
-//         elseif (\Input::get('key') && isset($arrModule[\Input::get('key')])) {
-//             $objCallback = new $arrModule[\Input::get('key')][0]();
-
-//             return $objCallback->{$arrModule[\Input::get('key')][1]}($dc, $strTable, $arrModule);
-//         } // Default action
-//         elseif (is_object($dc)) {
-//             $act = (string) \Input::get('act');
-
-//             if ('' === $act || 'paste' === $act || 'select' === $act) {
-//                 $act = ($dc instanceof \listable) ? 'showAll' : 'edit';
-//             }
-
-//             switch ($act) {
-//                 case 'delete':
-//                 case 'show':
-//                 case 'showAll':
-//                 case 'undo':
-//                     if (!$dc instanceof \listable) {
-//                         \System::log('Data container ' . $strTable . ' is not listable', __METHOD__, TL_ERROR);
-//                         trigger_error('The current data container is not listable', E_USER_ERROR);
-//                     }
-//                     break;
-
-//                 case 'create':
-//                 case 'cut':
-//                 case 'cutAll':
-//                 case 'copy':
-//                 case 'copyAll':
-//                 case 'move':
-//                 case 'edit':
-//                     if (!$dc instanceof \editable) {
-//                         \System::log('Data container ' . $strTable . ' is not editable', __METHOD__, TL_ERROR);
-//                         trigger_error('The current data container is not editable', E_USER_ERROR);
-//                     }
-//                     break;
-//             }
-
-//             return $dc->$act();
-//         }
-
-//         return null;
-//     }
-// }
