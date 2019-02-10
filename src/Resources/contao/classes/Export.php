@@ -3,45 +3,111 @@
 namespace HoerElectronic\ContaoImport;
 
 /***
- * 
- * 
- * 
+ *
+ *
+ *
  ***/
 class Export extends \BackendModule {
 
-	/*
-	 * 
+	/**
+	 * @property	Object	$xml_writer
+	 *
+	 * Reference of a XMLWriter-object which will be used
+	 * to generate XML-data during export
 	 */
 	protected $xml_writer = null;
 
-	/*
-	 * 
+	/**
+	 * @property	array	$types_cache
+	 * @property	array	$groups_cache
+	 * @property	array	$files_cache
+	 * @property	array	$pages_cache
+	 *
+	 * These arrays are used to cache the content of some Contao-tables:
+	 * - tl_iso_producttype
+	 * - tl_iso_group
+	 * - tl_files
+	 * - tl_page
 	 */
 	protected $types_cache = null;
 	protected $groups_cache = null;
 	protected $files_cache = null;
 	protected $pages_cache = null;
 
-	/*
-	 * 
+	/**
+	 * @property	array	$db_product_special
+	 *
+	 * This array lists all fields within the Isotope-table 'tl_iso_product'
+	 * which are used to save structural data (e.g. relations with other tables).
+	 *
+	 * The data of these fields will be handled in a special way.
 	 */
-	protected static $db_isotope = [
-		'id',
-		'pid',
-		'gid',
-		'tstamp',
-		'dateAdded',
-		'type',
-		'orderPages',
-		'published',
-	];
+	protected static $db_product_special = ['id', 'pid', 'gid', 'tstamp', 'dateAdded', 'type', 'orderPages', 'published', 'start', 'stop'];
 
 	/**
-	 * 
-	 * 
-	 * @param	array	$data
-	 * 
-	 * @return	array	
+	 * @property	array	$attributes_cache
+	 *
+	 * This array is used to cache the content of Isotope-table 'tl_iso_attribute'.
+	 *
+	 * The Isotope-table 'tl_iso_product' contains one additional field
+	 * for every custom product-attribute,
+	 * e.g. [
+	 * 			'supported_payments'=> [ 'id' => ..., 'name' => ..., 'type' => ..., 'legend' => ..., 'description' => ... ],
+	 * 			'operating_voltage'	=> [ 'id' => ..., 'name' => ..., 'type' => ..., 'legend' => ..., 'description' => ... ],
+	 * 			...
+	 * 		]
+	 *
+	 * The list will be initialised
+	 * when getAttributesList() is called for the first time.
+	 */
+	protected static $attributes_cache = null;
+
+	/**
+	 * This function is internally used to read the list of product-attributes
+	 * from the Isotope-table 'tl_iso_attribute'.
+	 *
+	 * The table content will be cached at the first time
+	 * this function is called.
+	 *
+	 * @param	bool	$names_only
+	 *		Set to true, if this function shall deliver the list of known attributes,
+	 *		otherwise the complete data of all product-attributes is returned.
+	 * @return	array
+	 *		List of internal attribute-names (if $names_only == true),
+	 *			e.g. [ 'supported_payments', 'operating_voltage', ... ], or
+	 * 		Data of all product-attributes (if $names_only != true),
+	 * 			i.e. $this->attributes_cache.
+	 */
+	protected function getAttributesList($names_only = true) {
+
+		if (! $this->attributes_cache) {
+			$this->attributes_cache = [];
+			$res = $this->Database->prepare("SELECT id, name, field_name, type, legend, description FROM tl_iso_attribute")->execute();
+			while ($data = $res->next()) {
+				$this->attributes_cache[$data->field_name] = [
+					'id'			=> $data->id,
+					'name'			=> $data->name,
+					'description'	=> $data->description,
+					'type'			=> $data->type,
+					'legend'		=> $data->legend,
+				];
+			}
+		}
+
+		return ($names_only) ? array_keys($this->attributes_cache) : $this->attributes_cache;
+	}
+
+	/**
+	 * Internally used function to build an unique identifier for a given product
+	 * of Isotope's database.
+	 *
+	 * @param	array	$data	Dataset out of Isotope's product-table 'tl_iso_product'
+	 *
+	 * @return	array	Array with two items:
+	 * 		$res[0]: Type of identifier (i.e. 'sku', 'name', 'alias')
+	 * 		$res[1]: Value of the related field of the given recordset
+	 *
+	 * If no identifier could be built the function returns with $res[0] == 'missing'.
 	 **/
 	protected function compileIdentifier($data) {
 
@@ -57,13 +123,13 @@ class Export extends \BackendModule {
 	/**
 	 * Internally used function to prepare the data (e.g. 'MLT 5') of one field (e.g. 'name')
 	 * from Isotope's table 'tl_iso_product' to be exported to XML.
-	 * 
+	 *
 	 * If the given data was serialised before (e.g. into 'a:0:{}'), it will be unserialised now (e.g. into an array).
-	 * 
+	 *
 	 * @param	array	$key_and_value	Array with two items:
 	 * 		$key_and_value[0] - Name of the database-field where the data comes from
 	 * 		$key_and_value[1] - Data of the database-field to be modified if needed
-	 * 
+	 *
 	 * @return	array|null	- Array with two items:
 	 * 		$res[0]: Name of the given database-field, maybe changed
 	 * 		$res[1]: Data of the given database-field, maybe changed
@@ -120,8 +186,11 @@ class Export extends \BackendModule {
 	}
 
 	/**
-	 * 
-	 * 
+	 *
+	 * @param	array	$key_and_value	Array with two items:
+	 * 		$key_and_value[0] - Name of the database-field
+	 * 		$key_and_value[1] - Data of the database-field
+	 * @return	null
 	 **/
 	protected function writeXmlValue($key_and_value, $attributes_array = null) {
 
@@ -161,8 +230,8 @@ class Export extends \BackendModule {
 	}
 
 	/**
-	 * 
-	 * 
+	 *
+	 *
 	 **/
 	protected function getProductType($type_id) {
 
@@ -180,27 +249,64 @@ class Export extends \BackendModule {
 	}
 
 	/**
-	 * 
-	 * 
+	 * Queries one productgroup from the Isotope-table 'tl_iso_group'.
+	 *
+	 * The table content will be cached at the first time
+	 * this function is called.
+	 *
+	 * @param	int		$group_id
+	 *		Identifier of the requested record, e.g. 13
+	 * @param	bool	$name_only
+	 *		Set to true if only the group's name shall be returned,
+	 *		otherwise the complete data will be returned as an array.
+	 * @return	string|array|null
+	 *		Name of the group (if $name_only == true); or
+	 *		Data of the group (if $name_only != true); or
+	 *		null iff group wasn't found
 	 **/
-	protected function getGroup($group_id) {
+	protected function getGroup($group_id, $name_only = true) {
 
 		if (! $group_id)
 			return null;
 
 		if (! $this->groups_cache) {
+			// Cache the data:
 			$this->groups_cache = [];
-			$res = $this->Database->prepare("SELECT id, name FROM tl_iso_group")->execute();
-			while ($data = $res->next())
-				$this->groups_cache[$data->id] = $data->name;
+			$res = $this->Database->prepare('SELECT id, name, sorting, product_type FROM tl_iso_group')->execute();
+			while ($data = $res->next()) {
+				$this->groups_cache[$data->id] = [
+					'name'		=> $data->name,
+					'sorting'	=> $data->sorting,
+					'type'		=> $data->product_type,
+				];
+			}
+		}
+
+		if ($name_only) {
+			return (array_key_exists($group_id, $this->groups_cache)) ? $this->groups_cache[$group_id]['name'] : null;
 		}
 
 		return (array_key_exists($group_id, $this->groups_cache)) ? $this->groups_cache[$group_id] : null;
 	}
 
 	/**
-	 * 
-	 * 
+	 * Queries one file from Contao-table 'tl_files'.
+	 *
+	 * The record's data will be cached in case the function
+	 * will be called with the same UUID again.
+	 *
+	 * @param	string	$binary_uuid
+	 *		Binary string with the UUID of the requested file
+	 * @return	array|string
+	 *		If a file with the UUID was found,
+	 *		the file's path and name are returned;
+	 *			e.g. [
+	 *					'filepath'	=> 'files/downloads/datasheet1.pdf',
+	 *					'filename'	=> 'datasheet1.pdf'
+	 *				 ]
+	 * 		Otherwise a string with a hexadecimal representation
+	 *		of the file's UUID will be delivered
+	 *			e.g. "Contao-UUID:0x1063f56189f211e5bfe000163e4fa28f"
 	 **/
 	protected function getFile($binary_uuid) {
 
@@ -211,9 +317,9 @@ class Export extends \BackendModule {
 
 		if (! $this->files_cache)
 			$this->files_cache = [];
-	
+
 		if (! array_key_exists($uuid, $this->files_cache)) {
-			$res = $this->Database->prepare("SELECT path, name FROM tl_files WHERE uuid = ?")->execute($binary_uuid);
+			$res = $this->Database->prepare("SELECT path, name FROM tl_files WHERE uuid = ? AND type = 'file'")->execute($binary_uuid);
 			$data = $res->next();
 			$this->files_cache[$uuid] = ($data) ? ['filepath' => $data->path, 'filename' => $data->name] : "Contao-UUID:0x$uuid";
 		}
@@ -222,11 +328,10 @@ class Export extends \BackendModule {
 	}
 
 	/**
-	 * 
-	 * 
-	 * 
-	 * @param	integer|array	$page_ids
-	 * 
+	 * Internally used function to query the data of one or more Contao-pages of the current site.
+	 *
+	 * @param	integer|array	$page_ids	IDs of one or more
+	 *
 	 * @return	null|array
 	 **/
 	protected function getPages($page_ids) {
@@ -263,8 +368,8 @@ class Export extends \BackendModule {
 	}
 
 	/**
-	 * 
-	 * 
+	 *
+	 *
 	 **/
 	public function generate() {
 
@@ -280,20 +385,18 @@ class Export extends \BackendModule {
 
 		$products = $this->Database->prepare("SELECT * FROM tl_iso_product p WHERE NOT p.pid > 0 ORDER BY id")->execute();
 		while ($p_data = $products->next()) {
-			//
+			// Get the product's data:
 			$p_data = $p_data->row();
-			// $ident_array = static::compileIdentifier($p_data);
 			$ident = $this->compileIdentifier($p_data);
 			// Look for product's variants:
 			$v_data = $this->Database->prepare("SELECT * FROM tl_iso_product p WHERE p.pid = ? ORDER BY id")->execute($p_data['id']);
 			$variants = [];
 			while ($v = $v_data->next())
 				$variants[] = $v->row();
-			//
+			// Process the current product and its variants:
 			for ($i = -1; $i < count($variants); $i++) {
-				// Get data of current product:
 				$row = ($i == -1) ? $p_data : $variants[$i];
-				// Open new XML-range for current product:
+				// Open new XML-range for current product / variant:
 				$this->xml_writer->startElementNS('isotope', 'product', null);
 				if ($ident[1])
 					$this->xml_writer->writeAttribute('id', $ident[1]);
@@ -302,25 +405,24 @@ class Export extends \BackendModule {
 					$this->xml_writer->writeAttribute('variant-index', $i);
 				// Memorise some structural data connected to Isotope's database:
 				$this->xml_writer->startElementNS('isotope', 'contao-data', null);
-				foreach (static::$db_isotope as $key) {
+				foreach (static::$db_product_special as $key) {
 					if (array_key_exists($key, $row))
 						$this->writeXmlValue($this->convertData([$key, $row[$key]]));
 				}
 				$this->xml_writer->endElement();
-				//
-				if ($i == -1) {
-					foreach (['type' => 'producttype', 'gid' => 'group', 'orderPages' => 'categories'] as $key1 => $key2) {
-						if (array_key_exists($key1, $row))
-							$this->writeXmlValue($this->convertData([$key2, $row[$key1]]));
-					}
+				// Memorise some general data of current product:
+				if ($i == -1) foreach (['type' => 'producttype', 'gid' => 'group', 'orderPages' => 'categories'] as $key1 => $key2) {
+					if (array_key_exists($key1, $row))
+						$this->writeXmlValue($this->convertData([$key2, $row[$key1]]));
 				}
-				// 
+				// Memorise all data of current product / variant,
+				// skipping the already processed data (identifier, structural data):
 				foreach ($row as $key => $value) {
-					if ($key == $ident[0] || array_search($key, static::$db_isotope) !== FALSE)
+					if ($key == $ident[0] || array_search($key, static::$db_product_special) !== FALSE)
 						continue;
 					$this->writeXmlValue($this->convertData([$key, $value]));
 				}
-				//
+				// Close XML-range </isotope:product>
 				$this->xml_writer->endElement();
 			}
 		}
@@ -331,8 +433,8 @@ class Export extends \BackendModule {
 	}
 
 	/**
-	 * 
-	 * 
+	 *
+	 *
 	 **/
 	protected function compile() {
 
