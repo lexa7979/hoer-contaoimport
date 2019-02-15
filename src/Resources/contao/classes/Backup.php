@@ -5,6 +5,13 @@ namespace HoerElectronic\ContaoImport;
 
 function my_unserialize($serialized_data) {
 
+	if (is_array($serialized_data)) {
+		foreach ($serialized_data as $key => $value) {
+			$serialized_data[$key] = my_unserialize($value);
+		}
+		return $serialized_data;
+	}
+
 	if (!is_string($serialized_data)) {
 		return $serialized_data;
 	}
@@ -389,7 +396,7 @@ class Backup extends \BackendModule {
 	 *		Two-dimensional array with all found prices; or
 	 *		null iff product wasn't found
 	 */
-	protected function getPrices($product_id) {
+	protected function getPrices($product_id, $include_ids = false) {
 
 		if (!is_numeric($product_id) || $product_id <= 0) {
 			return null;
@@ -399,196 +406,152 @@ class Backup extends \BackendModule {
 
 		$res1 = $this->Database->prepare('SELECT id, tax_class, member_group FROM tl_iso_product_price WHERE pid = ?')->execute($product_id);
 		while ($p1 = $res1->next()) {
-			$res2 = $this->Database->prepare('SELECT min, price FROM tl_iso_product_pricetier WHERE pid = ?')->execute($p1->id);
+			$res2 = $this->Database->prepare('SELECT id, min, price FROM tl_iso_product_pricetier WHERE pid = ?')->execute($p1->id);
 			while ($p2 = $res2->next()) {
-				$prices[] = [
+				$p = array_filter([
 					'price'			=> $p2->price,
 					'min'			=> $p2->min,
 					'tax_class'		=> $this->getTaxClass($p1->tax_class),
 					'member_group'	=> $this->getMemberGroup($p1->member_group),
-				];
+				]);
+				if ($include_ids) {
+					$p['contao-id:price']		= $res1->id;
+					$p['contao-id:pricetier']	= $res2->id;
+				}
+				$prices[] = $p;
 			}
 		}
 
 		return count($prices) ? $prices : null;
 	}
 
-	/**
-	 * Internally used function to build an unique identifier for a given product
-	 * of Isotope's database.
-	 *
-	 * @param	array	$data
-	 * 		Dataset out of Isotope's product-table 'tl_iso_product'
-	 * @return	array
-	 * 		Array with two items:
-	 * 			$res[0]: Type of identifier (i.e. 'sku', 'name', 'alias')
-	 * 			$res[1]: Value of the related field of the given recordset
-	 *
-	 * If no identifier could be built the function returns with $res[0] == 'missing'.
-	 **/
-	protected function compileIdentifier($data) {
+	protected function collectCompleteProductData($isotope_id, $include_ids = false) {
 
-		// if (is_array($data)) foreach (array('sku', 'name', 'alias') as $key) {
-		if (is_array($data)) foreach (['alias', 'name', 'sku'] as $key) {
-			$b = (array_key_exists($key, $data)) ? $this->convertData([$key, $data[$key]]) : null;
-			if ($b && is_array($b) && count($b) == 2)
-				return $b;
+		$result = [
+			'main' => [],
+			'variants' => [],
+			'identifier' => []
+		];
+
+		// Grab the product and its variants:
+		$isotope = $this->Database->prepare('SELECT * FROM tl_iso_product WHERE id = ?')->execute($isotope_id)->first();
+		if (!$isotope) {
+			throw new \Error('Can\'t find product in Isotope\'s database.');
+		}
+		$product_main = my_unserialize(array_filter($isotope->row()));
+		$product_variants = [];
+		$isotope = $this->Database->prepare('SELECT * FROM tl_iso_product WHERE pid = ? AND language = "" ORDER BY id')->execute($product_main['id']);
+		while ($isotope->next()) {
+			$product_variants[] = my_unserialize(array_filter($isotope->row()));
 		}
 
-		return ['missing', null];
+		// Compile an identifier for the given product:
+		$product_identifier = null;
+		foreach (['alias', 'name', 'sku'] as $key) {
+			if (array_key_exists($key, $product_main) && is_string($product_main[$key])) {
+				$product_identifier = [$key, $product_main[$key]];
+			}
+		}
+		if (!$product_identifier) {
+			throw new \Error('Failed to compile identifier for Isotope product with ID ' . $product_main['id']);
+		}
+
+		// Process the found records:
+		for ($i = -1; $i < count($product_variants); $i++) {
+			$row = ($i == -1) ? $product_main : $product_variants[$i];
+			// Reorganise the data of the current record:
+			$ranges = [
+				'main'			=> [],
+				'attributes'	=> [],
+				'contao-data'	=> [],
+			];
+			foreach ($row as $key => $value) {
+				if ($i == -1 && $key == $product_identifier[0]) {
+					continue;
+				}
+				$skip = false;
+				switch ($key) {
+					case 'shipping_weight':
+						$skip = (is_array($value) && count($value) == 2 && $value[0] == '' && $value[1] == 'kg');
+						break;
+					case 'shipping_price':
+						$skip = ($value == '0.00');
+						break;
+					case 'download':
+						if (is_array($value)) {
+							foreach ($value as $k2 => $v2) {
+								$value[$k2] = $this->getFile($v2);
+							}
+						}
+						else {
+							$skip = true;
+						}
+						break;
+					case 'download_order':
+						$skip = true;
+						break;
+				}
+				if (!$skip) {
+					if (array_search($key, static::$db_product_special) !== false) {
+						$ranges['contao-data'][$key] = $value;
+						if ($i == -1) {
+							switch ($key) {
+								case 'type':		$ranges['main']['producttype']	= $this->getProductType($value);	break;
+								case 'gid':			$ranges['main']['group']		= $this->getGroup($value);			break;
+								case 'orderPages':	$ranges['main']['categories']	= $this->getPages($value);			break;
+							}
+						}
+					}
+					else if ($this->getAttribute($key) != null) {
+						$ranges['attributes'][$key] = $value;
+					}
+					else {
+						$ranges['main'][$key] = $value;
+					}
+				}
+			}
+			$data = $ranges['main'];
+			if (count($ranges['attributes'])) {
+				$data['attributes'] = $ranges['attributes'];
+			}
+			if ($include_ids && count($ranges['contao-data'])) {
+				$data['contao-data'] = $ranges['contao-data'];
+			}
+			// Grab translations:
+			$isotope = $this->Database
+				->prepare('SELECT id, name, description, language FROM tl_iso_product WHERE pid = ? AND language <> "" ORDER BY id')
+				->execute($row['id']);
+			while ($isotope->next()) {
+				$l = [
+					'name'			=> $isotope->name,
+					'description'	=> $isotope->description
+				];
+				if ($include_ids) {
+					$l['contao-id'] = $isotope->id;
+				}
+				if (!array_key_exists('translations', $data)) {
+					$data['translations'] = [];
+				}
+				$data['translations']["item|language:{$isotope->language}"] = $l;
+			}
+			// Grab prices:
+			$p = $this->getPrices($row['id'], $include_ids);
+			if ($p) {
+				$data['prices'] = $p;
+			}
+			// Include current record into result set:
+			if ($i == -1) {
+				$result['main'] = $data;
+			}
+			else {
+				$result['variants'][] = $data;
+			}
+		}
+
+		$result['identifier'] = $product_identifier;
+		return $result;
 	}
 
-	/**
-	 * Internally used function to prepare the data (e.g. 'MLT 5') of one field (e.g. 'name')
-	 * from Isotope's table 'tl_iso_product' to be exported to XML.
-	 *
-	 * If the given data was serialised before (e.g. into 'a:0:{}'),
-	 * it will be unserialised now (e.g. into an array).
-	 *
-	 * @param	array		$key_and_value
-	 * 		Array with two items:
-	 * 			$key_and_value[0] - Name of the database-field where the data comes from
-	 * 			$key_and_value[1] - Data of the database-field to be modified if needed
-	 * @return	array|null
-	 * 		Array with two items:
-	 * 			$res[0]: Name of the given database-field, maybe changed
-	 * 			$res[1]: Data of the given database-field, maybe changed
-	 * 		- Null is returned in case of faulty data or
-	 *			data that shall not automatically be included into XML.
-	 **/
-	protected function convertData($key_and_value) {
-
-		// Read arguments which are given as an array:
-		if (!is_array($key_and_value) || count($key_and_value) != 2 || !is_scalar($key_and_value[0])) {
-			return null;
-		}
-		list($key, $value) = $key_and_value;
-
-		// Recognise serialised values:
-		$v = unserialize($value);
-		if ($v !== FALSE) {
-			$value = $v;
-		}
-
-		// Skip empty fields:
-		if (!$value || (is_array($value) && !count($value))) {
-			return null;
-		}
-
-		// Convert data if needed:
-		switch ($key) {
-
-			case 'download_order':	return null;
-
-			case 'producttype':		$value = $this->getProductType($value);		break;
-			case 'group':			$value = $this->getGroup($value);			break;
-			case 'categories':		$value = $this->getPages($value);			break;
-
-			case 'shipping_weight':
-				// Skip if value equals ['', 'kg']:
-				if (is_array($value) && count($value) == 2 && $value[0] == '' && $value[1] == 'kg') {
-					return null;
-				}
-				break;
-
-			case 'shipping_price':
-				if ($value == '0.00') {
-					return null;
-				}
-				break;
-
-			case 'download':
-				if (!is_array($value)) {
-					return null;
-				}
-				foreach ($value as $k => $v) {
-					$value[$k] = $this->getFile($v);
-				}
-				break;
-		}
-
-		// Return pair of data:
-		return [$key, $value];
-	}
-
-	/**
-	 * This function is internally used to append the given data to the XML-file.
-	 *
-	 * The XML-file is accessed by $this->xml_writer.
-	 *
-	 * The name of the XML-node may contain additional attributes encoded as
-	 * $key_and_value[0] = "name|attribute1:value1|attribute2:value2|...",
-	 *		e.g. "item|language:en" will be written as
-	 *			 <isotope:item language="en">...</isotope:item>
-	 *
-	 * @param	array		$key_and_value
-	 *		Array with two items:
-	 * 			$key_and_value[0] - Name of the XML-node (and attributes if applicable, see above)
-	 * 			$key_and_value[1] - Data of the XML-node
-	 * @param	array|null	$attributes_array
-	 *		Array with additional attributes which shall be used for the current XML-node; or
-	 *		null if no additional attributes shall be added
-	 * @param	bool		$convert_before
-	 *		Set to true iff the given data shall be processed by convertData() before it's appended to the XML-file
-	 * @return	null
-	 **/
-	protected function writeXmlValue($key_and_value, $attributes_array = null, $convert_before = true) {
-
-		if ($convert_before) {
-			$key_and_value = $this->convertData($key_and_value);
-		}
-
-		// Read the given pair of name and data:
-		if (!is_array($key_and_value) || count($key_and_value) != 2 || !is_scalar($key_and_value[0])) {
-			return;
-		}
-		list($key, $value) = $key_and_value;
-		if (!is_scalar($value) && (!is_array($value) || count($value) == 0)) {
-			return;
-		}
-
-		// Check for attributes given together with the XML-node's name:
-		$k_parts = explode('|', $key);
-		if (is_array($k_parts) && count($k_parts) > 1) {
-			if ($k_parts[0] == '') {
-				return;
-			}
-			$key = $k_parts[0];
-			if (!is_array($attributes_array)) {
-				$attributes_array = [];
-			}
-			for ($i = 1; $i < count($k_parts); $i++) {
-				$a_parts = explode(':', $k_parts[$i]);
-				if (is_array($a_parts) && count($a_parts) == 2 && $a_parts[0] != '') {
-					$attributes_array[$a_parts[0]] = $a_parts[1];
-				}
-			}
-		}
-
-		// Open a new XML-node:
-		$this->xml_writer->startElementNS('isotope', $key, null);
-		if (is_array($attributes_array)) {
-			foreach ($attributes_array as $k => $v) {
-				$this->xml_writer->writeAttribute($k, $v);
-			}
-		}
-
-		// Write the node's data:
-		if (is_array($value)) {
-			foreach ($value as $k => $v) {
-				if (is_int($k)) {
-					$this->writeXmlValue(['item', $v], ['index' => $k], false);
-				} else {
-					$this->writeXmlValue([$k, $v], null, false);
-				}
-			}
-		} else {
-			$this->xml_writer->text($value);
-		}
-
-		// Close the XML-node:
-		$this->xml_writer->endElement();
-	}
 
 	protected function prepareTmpDir() {
 
@@ -640,150 +603,6 @@ class Backup extends \BackendModule {
 		return ($include_tableName) ? [$max_ts, $max_table] : $max_ts;
 	}
 
-	/**
-	 *
-	 *
-	 **/
-	protected function createExportFile() {
-
-		$this->xml_writer = new \XMLWriter();
-
-		$dir = $this->prepareTmpDir();
-		$exportfile = "$dir/{$this->exportFile}.xml";
-		$exportzip	= "$dir/{$this->exportFile}.zip";
-		$exportts	= "$dir/{$this->exportFile}.ts";
-		$exportlock	= "$dir/{$this->exportFile}.lock";
-
-		if (file_exists($exportlock)) {
-			throw new \Error('Lockfile found');
-		}
-		$lock = rand();
-		file_put_contents($exportlock, $lock);
-		if (file_get_contents($exportlock) != $lock) {
-			throw new \Error('Writing lockfile failed');
-		}
-
-		list($max_ts, $max_table) = $this->getIsotopeTimestamp(true);
-		if (abs(time() - $max_ts) < 120) {
-			unlink($exportlock);
-			throw new \Error("Table '{$max_table}' was just altered - waiting...");
-		}
-		file_put_contents($exportts, $max_ts);
-
-		$this->xml_writer->openURI($exportfile);
-
-		$this->xml_writer->setIndent(true);
-		$this->xml_writer->startDocument('1.0', 'UTF-8');
-		$this->xml_writer->startElementNS('isotope', 'product-list', 'http://hoer-electronic.de');
-
-		$products = $this->Database->prepare('SELECT * FROM tl_iso_product p WHERE NOT p.pid > 0 ORDER BY alias')->execute();
-		while ($p_data = $products->next()) {
-			// Get the product's data:
-			$p_data = $p_data->row();
-			$ident = $this->compileIdentifier($p_data);
-			$p_data['prices'] = $this->getPrices($p_data['id']);
-			$r_lang = $this->Database->prepare('SELECT id, name, description, language FROM tl_iso_product p WHERE p.pid = ? AND language <> "" ORDER BY id')->execute($p_data['id']);
-			$p_data['translations'] = [];
-			while ($r = $r_lang->next()) {
-				$p_data['translations']['item|language:' . $r->language] = ['name' => $r->name, 'description' => $r->description, 'contao-id' => $r->id];
-			}
-			$p_data = array_filter($p_data);
-			// Look for product's variants and their data:
-			$v_data = $this->Database->prepare('SELECT * FROM tl_iso_product p WHERE p.pid = ? AND language = "" ORDER BY id')->execute($p_data['id']);
-			$variants = [];
-			while ($v = $v_data->next()) {
-				$variant = $v->row();
-				$variant['prices'] = $this->getPrices($variant['id']);
-				$r_lang = $this->Database->prepare('SELECT id, name, description, language FROM tl_iso_product p WHERE p.pid = ? AND language <> "" ORDER BY id')->execute($variant['id']);
-				$variant['translations'] = [];
-				while ($r = $r_lang->next()) {
-					$variant['translations']['item|language:' . $r->language] = ['name' => $r->name, 'description' => $r->description, 'contao-id' => $r->id];
-				}
-				$variants[] = array_filter($variant);
-				// $variants[] = $variant;
-			}
-			// Open new XML-range for current product:
-			$this->xml_writer->startElementNS('isotope', 'product', null);
-			if ($ident[1]) {
-				$this->xml_writer->writeAttribute('id', $ident[1]);
-			}
-			$this->xml_writer->writeAttribute('id-type', $ident[0]);
-			// Process the current product and its variants:
-			for ($i = -1; $i < count($variants); $i++) {
-				$this->xml_writer->startElementNS('isotope', $i == -1 ? 'main' : 'variant', null);
-				$row = ($i == -1) ? $p_data : $variants[$i];
-				if ($i >= 0) {
-					$this->xml_writer->writeAttribute('variant-index', $i);
-				}
-				// Split the data of the current record into different ranges:
-				$ranges = [
-					'skip'			=> [],
-					'main'			=> [],
-					'attributes'	=> [],
-					'contao-data'	=> [],
-				];
-				foreach ($row as $key => $value) {
-					if ($key == $ident[0]) {
-						$ranges['skip'][$key] = $value;
-					}
-					else if (array_search($key, static::$db_product_special) !== false) {
-						$ranges['contao-data'][$key] = $value;
-						if ($i == -1) {
-							switch ($key) {
-								case 'type':		$ranges['main']['producttype'] = $value;	break;
-								case 'gid':			$ranges['main']['group'] = $value;			break;
-								case 'orderPages':	$ranges['main']['categories'] = $value;		break;
-							}
-						}
-					}
-					else if ($this->getAttribute($key) != null) {
-						$ranges['attributes'][$key] = $value;
-					}
-					else {
-						$ranges['main'][$key] = $value;
-					}
-				}
-				// Append all current data to the XML-file:
-				foreach ($ranges as $range => $data) {
-					if ($range == 'skip' || !is_array($data) || count($data) == 0) {
-						continue;
-					}
-					if ($range != 'main') {
-						$this->xml_writer->startElementNS('isotope', $range, null);
-					}
-					foreach ($data as $key => $value) {
-						$this->writeXmlValue([$key, $value]);
-					}
-					if ($range != 'main') {
-						$this->xml_writer->endElement();
-					}
-				}
-				$this->xml_writer->endElement();
-			}
-			// Close XML-range </isotope:product>
-			$this->xml_writer->endElement();
-		}
-
-		$this->xml_writer->endElement();
-		$this->xml_writer->flush();
-
-		unset($this->xml_writer);
-		$this->xml_writer = null;
-
-		try {
-			$zip = new \ZipArchive;
-			$res = $zip->open($exportzip, \ZipArchive::CREATE);
-			if ($res === true) {
-				$zip->addFile($exportfile, "{$this->exportFile}.xml");
-				$zip->close();
-			}
-		}
-		catch (\Throwable $error) {
-
-		}
-
-		unlink($exportlock);
-	}
 
 	protected function checkExportFile() {
 
@@ -840,6 +659,160 @@ class Backup extends \BackendModule {
 		return ['success' => true, 'code' => 'create-export-successful', 'file' => $exportfile];
 	}
 
+	/**
+	 * This function is internally used to append the given data to the XML-file.
+	 *
+	 * The XML-file is accessed by $this->xml_writer.
+	 *
+	 * The name of the XML-node may contain additional attributes encoded as
+	 * $key_and_value[0] = "name|attribute1:value1|attribute2:value2|...",
+	 *		e.g. "item|language:en" will be written as
+	 *			 <isotope:item language="en">...</isotope:item>
+	 *
+	 * @param	array		$key_and_value
+	 *		Array with two items:
+	 * 			$key_and_value[0] - Name of the XML-node (and attributes if applicable, see above)
+	 * 			$key_and_value[1] - Data of the XML-node
+	 * @param	array|null	$attributes_array
+	 *		Array with additional attributes which shall be used for the current XML-node; or
+	 *		null if no additional attributes shall be added
+	 * @return	null
+	 **/
+	protected function writeXmlValue($key, $value) {
+
+		if (!is_scalar($key)) {
+			return;
+		}
+		if (!is_scalar($value) && (!is_array($value) || count($value) == 0)) {
+			return;
+		}
+
+		// Check for attributes given together with the XML-node's name, e.g. "item|index:0":
+		$k_parts = explode('|', $key);
+		if (is_array($k_parts) && count($k_parts) > 1) {
+			if ($k_parts[0] == '') {
+				return;
+			}
+			$key = $k_parts[0];
+			if (!is_array($attributes_array)) {
+				$attributes_array = [];
+			}
+			for ($i = 1; $i < count($k_parts); $i++) {
+				$a_parts = explode(':', $k_parts[$i]);
+				if (is_array($a_parts) && count($a_parts) == 2 && $a_parts[0] != '') {
+					$attributes_array[$a_parts[0]] = $a_parts[1];
+				}
+			}
+		}
+
+		// Open a new XML-node:
+		$this->xml_writer->startElementNS('isotope', $key, null);
+		if (is_array($attributes_array)) {
+			foreach ($attributes_array as $k => $v) {
+				$this->xml_writer->writeAttribute($k, $v);
+			}
+		}
+
+		// Write the node's data:
+		if (is_array($value)) {
+			foreach ($value as $k => $v) {
+				if (is_int($k)) {
+					$this->writeXmlValue("item|index:$k", $v);
+				} else {
+					$this->writeXmlValue($k, $v);
+				}
+			}
+		} else {
+			$this->xml_writer->text($value);
+		}
+
+		// Close the XML-node:
+		$this->xml_writer->endElement();
+	}
+
+	/**
+	 *
+	 *
+	 **/
+	protected function createExportFile() {
+
+		$this->xml_writer = new \XMLWriter();
+
+		$dir = $this->prepareTmpDir();
+		$exportfile = "$dir/{$this->exportFile}.xml";
+		$exportzip	= "$dir/{$this->exportFile}.zip";
+		$exportts	= "$dir/{$this->exportFile}.ts";
+		$exportlock	= "$dir/{$this->exportFile}.lock";
+
+		if (file_exists($exportlock)) {
+			throw new \Error('Lockfile found');
+		}
+		$lock = rand();
+		file_put_contents($exportlock, $lock);
+		if (file_get_contents($exportlock) != $lock) {
+			throw new \Error('Writing lockfile failed');
+		}
+
+		list($max_ts, $max_table) = $this->getIsotopeTimestamp(true);
+		if (abs(time() - $max_ts) < 120) {
+			unlink($exportlock);
+			throw new \Error("Table '{$max_table}' was just altered - waiting...");
+		}
+		file_put_contents($exportts, $max_ts);
+
+		$this->xml_writer->openURI($exportfile);
+
+		$this->xml_writer->setIndent(true);
+		$this->xml_writer->startDocument('1.0', 'UTF-8');
+		$this->xml_writer->startElementNS('isotope', 'product-list', 'http://hoer-electronic.de');
+
+		$product = $this->Database->execute('SELECT id FROM tl_iso_product WHERE NOT pid > 0 ORDER BY alias');
+		while ($product->next()) {
+			$data = $this->collectCompleteProductData($product->id);
+			// Open new XML-range for current product:
+			$this->xml_writer->startElementNS('isotope', 'product', null);
+			if ($data['identifier'][1]) {
+				$this->xml_writer->writeAttribute('id', $data['identifier'][1]);
+			}
+			$this->xml_writer->writeAttribute('id-type', $data['identifier'][0]);
+			// Process the current product and its variants:
+			for ($i = -1; $i < count($data['variants']); $i++) {
+				$this->xml_writer->startElementNS('isotope', $i == -1 ? 'main' : 'variant', null);
+				if ($i >= 0) {
+					$this->xml_writer->writeAttribute('variant-index', $i);
+				}
+				// Append all current data to the XML-file:
+				$row = ($i == -1) ? $data['main'] : $data['variants'][$i];
+				foreach ($row as $key => $value) {
+					$this->writeXmlValue($key, $value);
+				}
+				$this->xml_writer->endElement();
+			}
+			// Close XML-range </isotope:product>
+			$this->xml_writer->endElement();
+		}
+
+		$this->xml_writer->endElement();
+		$this->xml_writer->flush();
+
+		unset($this->xml_writer);
+		$this->xml_writer = null;
+
+		try {
+			$zip = new \ZipArchive;
+			$res = $zip->open($exportzip, \ZipArchive::CREATE);
+			if ($res === true) {
+				$zip->addFile($exportfile, "{$this->exportFile}.xml");
+				$zip->close();
+			}
+		}
+		catch (\Throwable $error) {
+
+		}
+
+		unlink($exportlock);
+	}
+
 	protected function downloadExportFile() {
 
 		try {
@@ -863,6 +836,7 @@ class Backup extends \BackendModule {
 			return;
 		}
 	}
+
 
 	protected function checkImportFile() {
 
@@ -964,6 +938,45 @@ class Backup extends \BackendModule {
 		}
 	}
 
+	protected function analysisAddError($code, $message = null, $related_item = null) {
+
+		$item = $this->Database->execute('SELECT id, data FROM tl_isobackup WHERE status = "errors" LIMIT 1')->first();
+		if (!$item) {
+			throw new \Error('Can\'t save error-message in database: Record not found.');
+		}
+
+		$data = ($item->data) ? json_decode($item->data, true) : [];
+
+		if (!$code) {
+			$code = 'general';
+		}
+		if (!array_key_exists($code, $data)) {
+			$data[$code] = [];
+		}
+
+		if ($message) {
+			if (!array_key_exists('messages', $data[$code])) {
+				$data[$code]['messages'] = [];
+			}
+			if (array_search($message, $data[$code]['messages']) === false) {
+				$data[$code]['messages'][] = $message;
+			}
+		}
+
+		if ($related_item) {
+			if (!array_key_exists('items', $data[$code])) {
+				$data[$code]['items'] = [];
+			}
+			if (array_search($related_item, $data[$code]['items']) === false) {
+				$data[$code]['items'][] = $related_item;
+			}
+		}
+
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET data = ? WHERE id = ?')->execute(json_encode($data), $item->id)) {
+			throw new \Error('Can\'t save error-message in database: Update failed.');
+		}
+	}
+
 	protected function xmlNodeToArray($xml_reader, $include_attributes = false, $allow_deeper = 10) {
 
 		if ($include_attributes) {
@@ -1028,24 +1041,67 @@ class Backup extends \BackendModule {
 		return ($include_attributes) ? ['attributes' => $a_attributes, 'name_with_attributes' => $s_attributes, 'data' => $data] : $data;
 	}
 
-	protected function analyseImportItem() {
+	protected function importCountItems($progressing_from = null, $progressing_to = null) {
 
-		// Count import-items:
-		$res = $this->Database->execute('SELECT COUNT(*) as n FROM tl_isobackup WHERE import_id IS NOT NULL')->first();
+		$item_count = [
+			'created'		=> 0,
+			'prepared'		=> 0,
+			'analysed'		=> 0,	// Final state
+			'total'			=> 0,
+			'other_states'	=> [],	// List of found states which are not listed here, e.g. 'preparing'
+		];
+
+		$res = $this->Database->execute('SELECT status, COUNT(*) as n FROM tl_isobackup WHERE import_id IS NOT NULL GROUP BY status')->first();
 		if (!$res) {
 			throw new \Error('Can\'t determine number of import-items.');
 		}
-		$n_total = $res->n;
-		$res = $this->Database->execute('SELECT COUNT(*) as n FROM tl_isobackup WHERE status = "created" AND import_id IS NOT NULL')->first();
-		if (!$res) {
-			throw new \Error('Can\'t determine number of waiting import-items.');
-		}
-		$n_waiting = $res->n;
 
-		if ($n_waiting == 0) {
+		do {
+			if (!array_key_exists($res->status, $item_count)) {
+				$item_count['other_states'][] = $res->status;
+			}
+			$item_count[$res->status] = $res->n;
+			$item_count['total'] += $res->n;
+		} while ($res->next());
+
+		if ($progressing_from && $progressing_to) {
+			if (array_key_exists($progressing_from, $item_count) && $item_count[$progressing_from] > 0) {		// e.g. count(created) between 1 and 10
+				if (array_key_exists($progressing_to, $item_count) && $item_count[$progressing_to] > 0) {	// e.g. count(created) == 3, count(prepared) == 7
+					$t = $item_count[$progressing_from] + $item_count[$progressing_to];
+					$item_count['progress_prev'] = ($item_count[$progressing_to] - 1) / $t;
+					$item_count['progress']      = $item_count[$progressing_to] / $t;
+					$item_count['progress_next'] = ($item_count[$progressing_to] + 1) / $t;
+				}
+				else {						// e.g. count(created) == 10, count(prepared) == 0
+					$item_count['progress_prev'] = 0;
+					$item_count['progress'] = 0;
+					$item_count['progress_next'] = 1 / $item_count[$progressing_from];
+				}
+			}
+			else {							// e.g. count(created) == 0
+				if (array_key_exists($progressing_to, $item_count) && $item_count[$progressing_to] > 0) {	// e.g. count(created) == 0, count(prepared) == 10
+					$item_count['progress_prev'] = 1 - 1 / $item_count[$progressing_to];
+				}
+				else {						// e.g. count(created) == 0, count(prepared) == 0
+					$item_count['progress_prev'] = 1;
+				}
+				$item_count['progress'] = 1;
+				$item_count['progress_next'] = 1;
+			}
+		}
+
+		return $item_count;
+	}
+
+	protected function importPrepareNextItem() {
+
+		$item_count = $this->importCountItems('created', 'prepared');
+		if (array_search('preparing', $item_count['other_states']) !== false) {
+			throw new \Error('Unexpected import-item with state \'preparing\' found.');
+		}
+		if ($item_count['progress'] == 1) {
 			return 1;
 		}
-		$progress = (1 - ($n_waiting - 1) / $n_total);
 
 		// Get next import-item:
 		$item = $this->Database->execute('SELECT id, import_id, isotope_id, data, actions FROM tl_isobackup WHERE status = "created" AND import_id IS NOT NULL LIMIT 1')->first();
@@ -1056,6 +1112,7 @@ class Backup extends \BackendModule {
 			throw new \Error('Failed to update status of current import-item.');
 		}
 
+		// Parse XML:
 		$data = [];
 		$xml = new \XMLReader;
 		if (!$xml->XML('<?xml version="1.0" encoding="UTF-8"?' . '>' . $item->data) || !$xml->read()) {
@@ -1088,53 +1145,86 @@ class Backup extends \BackendModule {
 		$xml->close();
 		unset($xml);
 
-		if (!$this->Database->prepare('UPDATE tl_isobackup SET data = ? WHERE id = ?')->execute(json_encode($data), $item->id)) {
-			throw new \Error('Failed to update data of current import-item.');
+		// Update import-item:
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "prepared", data = ? WHERE id = ?')->execute(json_encode($data), $item->id)) {
+			throw new \Error('Failed to update current import-item.');
 		}
 
-		// Get alias:
-		$id = explode(':', $item->import_id, 2);
-		if (!is_array($id) || count($id) != 2 || $id[0] == '' || $id[1] == '') {
-			throw new \Error('Can\'t determine identifier of current import-item.');
+		return $item_count['progress_next'];
+	}
+
+	protected function importAnalyseNextItem() {
+
+		$item_count = $this->importCountItems('prepared', 'analysed');
+		if (array_search('analysing', $item_count['other_states']) !== false) {
+			throw new \Error('Unexpected import-item with state \'analysing\' found.');
 		}
+		if ($item_count['progress'] == 1) {
+			return 1;
+		}
+
+		// Get next import-item and its prepared data:
+		$item = $this->Database->execute('SELECT id, import_id, data FROM tl_isobackup WHERE status = "prepared" AND import_id IS NOT NULL LIMIT 1')->first();
+		if (!$item) {
+			throw new \Error('Failed to grab waiting import-item out of database.');
+		}
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "analysing" WHERE id = ?')->execute($item->id)) {
+			throw new \Error('Failed to update status of current import-item.');
+		}
+		if (!$item->data) {
+			$this->analysisAddError('empty-import-data', null, $item->id);
+			return $item_count['progress_next'];
+		}
+		$data = json_decode($item->data, true);
 
 		// Look for matching Isotope-product:
+		$id = explode(':', $item->import_id, 2);
+		if (!is_array($id) || count($id) != 2 || $id[0] == '' || $id[1] == '') {
+			$this->analysisAddError('invalid-import-id', null, $item->id);
+			return $item_count['progress_next'];
+		}
 		switch ($id[0]) {
 			case 'alias':
 			case 'sku':
 			case 'name':
-				$isotope = $this->Database->prepare("SELECT id FROM tl_iso_product WHERE pid = 0 AND {$id[0]} = ?")->execute($id[1])->first();
+				$isotope = $this->Database->prepare("SELECT id FROM tl_iso_product WHERE NOT pid > 0 AND {$id[0]} = ?")->execute($id[1])->first();
 				break;
 			default:
-				throw new \Error('Identifier of current import-item has invalid type');
+				$this->analysisAddError('invalid-import-id', null, $item->id);
+				return $item_count['progress_next'];
 		}
 		if (!$isotope) {
-			if (!$this->Database->prepare('UPDATE tl_isobackup SET actions = ?, status = "prepared" WHERE id = ?')
-						->execute(json_encode(['import-everything']), $item->id)) {
+			if (!$this->Database->prepare('UPDATE tl_isobackup SET actions = ?, status = "analysed" WHERE id = ?')->execute(json_encode(['import-everything']), $item->id)) {
 				throw new \Error('Failed to save needed actions with current import-item.');
 			}
-			return $progress;
+			return $item_count['progress_next'];
 		}
 		else if ($isotope->count() != 1) {
-			if (!$this->Database->prepare('UPDATE tl_isobackup SET actions = ?, status = "prepared" WHERE id = ?')
-						->execute(json_encode(['error' => 'more than one isotope-product match import-id']))) {
-				throw new \Error('Failed to save needed actions with current import-item.');
-			}
-			return $progress;
+			$this->analysisAddError('too-many-product-matches', null, $item->id);
+			return $item_count['progress_next'];
 		}
 		if (!$this->Database->prepare('UPDATE tl_isobackup SET isotope_id = ? WHERE id = ?')->execute($isotope->id, $item->id)) {
 			throw new \Error('Failed to save found Isotope-id with current import-item.');
 		}
+		$isotope_data = $this->collectCompleteProductData($isotope->id);
+
+		// Compare import-data with product-data:
+		$actions = [];
 
 
 
-		//
+		// var_dump(array("main", $isotope_main, "variants", $isotope_variants)); exit;
 
-		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "prepared" WHERE id = ?')->execute($item->id)) {
-			throw new \Error('Failed to update status of current import-item.');
+
+
+
+
+		// Update import-item:
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "analysed" WHERE id = ?')->execute($item->id)) {
+			throw new \Error('Failed to update current import-item.');
 		}
 
-		return $progress;
+		return $item_count['progress_next'];
 	}
 
 	protected function analyseImport($step) {
@@ -1149,8 +1239,9 @@ class Backup extends \BackendModule {
 
 		$step_flow = [
 			'init'				=> ['cleanup',			'analysis-started'],
-			'cleanup'			=> ['read-xml',			'analysis-readxml'],
-			'read-xml'			=> ['analyse-import',	'analysis-import'],
+			'cleanup'			=> ['read-xmlfile',		'analysis-readxmlfile'],
+			'read-xmlfile'		=> ['read-xmldata',		'analysis-readxmldata'],
+			'read-xmldata'		=> ['analyse-import',	'analysis-import'],
 			'analyse-import'	=> ['analyse-isotope',	'analysis-isotope'],
 			'analyse-isotope'	=> ['successful',		'analysis-successful'],
 			'successful'		=> null
@@ -1170,10 +1261,11 @@ class Backup extends \BackendModule {
 					$this->Database->execute('DELETE FROM tl_isobackup');
 					$this->Database->execute('ALTER TABLE tl_isobackup DROP id');
 					$this->Database->execute('ALTER TABLE tl_isobackup ADD id int(10) unsigned NOT NULL auto_increment primary key first');
-					$this->Database->prepare('INSERT INTO tl_isobackup (status,data,tstamp) VALUES (?,?,?)')->execute("setup", json_encode(['ts' => time(), 'status' => 'analysing']), time());
+					$this->Database->prepare('INSERT INTO tl_isobackup (status,data,tstamp) VALUES (?,?,?)')->execute("setup", json_encode(['ts' => time(), 'mode' => 'import', 'status' => 'in progress']), time());
+					$this->Database->prepare('INSERT INTO tl_isobackup (status,tstamp) VALUES (?,?)')->execute("errors", time());
 					$progress = 2;
 					break;
-				case 'read-xml':
+				case 'read-xmlfile':
 					$dir = $this->prepareTmpDir();
 					$importfile = "$dir/{$this->importFile}.xml";
 					$xml = new \XMLReader;
@@ -1207,34 +1299,42 @@ class Backup extends \BackendModule {
 					$xml->close();
 					$progress = 10;
 					break;
-				case 'analyse-import':
-					$sub_progress = $this->analyseImportItem();
+				case 'read-xmldata':
+					$sub_progress = $this->importPrepareNextItem();
 					$repeat_step = ($sub_progress < 1);
-					$progress = 10 + 60 * $sub_progress;
+					$progress = 10 + 40 * $sub_progress;
+					break;
+				case 'analyse-import':
+					$sub_progress = $this->importAnalyseNextItem();
+					$repeat_step = ($sub_progress < 1);
+					$progress = 50 + 40 * $sub_progress;
 					break;
 				case 'analyse-isotope':
-					$progress = 100;
+					$product = $this->Database->execute('SELECT id FROM tl_iso_product WHERE pid = 0');
+					do {
+						$item = $this->Database->prepare('SELECT COUNT(*) AS n FROM tl_isobackup WHERE isotope_id = ?')->execute($product->id)->first();
+						switch ($item->n) {
+							case 1:
+								break;
+							case 0:
+								if (!$this->Database->prepare('INSERT INTO tl_isobackup (status,isotope_id,actions) VALUES (?,?,?)')->execute('analysed', $product->id, json_encode(['confirm-delete']))) {
+									throw new \Error('Adding additional Isotope-product into import-table failed.');
+								}
+								break;
+							default:
+								$this->analysisAddError('too-many-product-entries', "Isotope product {$product->id}");
+								break;
+						}
+					} while ($product->next());
+					$progress = 98;
 					break;
 				case 'successful':
+					$progress = 100;
 					break;
 				case 'test':
-					$dir = $this->prepareTmpDir();
-					$importfile = "$dir/{$this->importFile}.xml";
-					$xml = new \XMLReader;
-					if (!$xml->open("file://$importfile") || !$xml->read()) {
-						throw new \Error("Opening XML with XMLReader failed");
-					}
-					for ($i = 0; $i < 1000; $i++) {
-						if ($xml->nodeType == \XMLReader::NONE) {
-							break;
-						}
-						echo sprintf('<p>%d [%d] %s: %s</p>', $xml->depth, $xml->nodeType, $xml->name, $xml->value);
-						if (!$xml->read()) {
-							break;
-						}
-					}
-					$xml->close();
-					break;
+					var_dump($this->collectCompleteProductData(16, true));
+					// var_dump(json_decode($this->Database->execute('SELECT data FROM tl_isobackup WHERE isotope_id = 16')->first()->data, true));
+					exit;
 				default:
 					return ['message' => "Error: Invalid analysis-step ($step)", 'progress' => 100];
 			}
@@ -1263,6 +1363,7 @@ class Backup extends \BackendModule {
 		}
 		return $res;
 	}
+
 
 	/**
 	 * Generate the module's output
