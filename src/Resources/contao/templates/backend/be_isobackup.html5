@@ -1,0 +1,80 @@
+<div id="tl_isobackup_startpage">
+	<div>
+		<h2><?= $GLOBALS['TL_LANG']['tl_isobackup']['introduction'][0] ?></h2>
+	</div>
+	<div>
+<?php
+			for ($i = 1; $i < count($GLOBALS['TL_LANG']['tl_isobackup']['introduction']); $i++) {
+				echo "		<p>" . $GLOBALS['TL_LANG']['tl_isobackup']['introduction'][$i] . "</p>\n";
+			}
+?>
+	</div>
+	<div>
+	<h2><?= $GLOBALS['TL_LANG']['tl_isobackup']['export-intro'][0] ?></h2>
+	</div>
+	<div class="left">
+<?php
+			for ($i = 1; $i < count($GLOBALS['TL_LANG']['tl_isobackup']['export-intro']); $i++) {
+				echo "		<p>" . $GLOBALS['TL_LANG']['tl_isobackup']['export-intro'][$i] . "</p>\n";
+			}
+?>
+	</div>
+	<div class="right">
+<?php
+			if ($this->exportReady['success']) {
+				echo '		<p>' . $GLOBALS['TL_LANG']['tl_isobackup'][$this->exportReady['code']] . "</p>\n";
+			}
+			else {
+				echo '		<p class="error">' . $GLOBALS['TL_LANG']['tl_isobackup'][$this->exportReady['code']] . "</p>\n";
+			}
+			if ($this->exportReady['message']) {
+				echo '		<p>' . $GLOBALS['TL_LANG']['tl_isobackup']['error message'] . ': ' . $this->exportReady['message'] . "</p>\n";
+			}
+			if ($this->exportReady['file']) {
+				echo '		<a href="' . TL_SCRIPT . '?do=isobackup&action=download" target="_blank" rel="noopener"><button>' . $GLOBALS['TL_LANG']['tl_isobackup']['download'] . "</button></a>\n";
+			}
+?>
+	</div>
+	<div>
+	<h2><?= $GLOBALS['TL_LANG']['tl_isobackup']['import-intro'][0] ?></h2>
+	</div>
+	<div class="left">
+<?php
+			for ($i = 1; $i < count($GLOBALS['TL_LANG']['tl_isobackup']['import-intro']); $i++) {
+				echo "		<p>" . $GLOBALS['TL_LANG']['tl_isobackup']['import-intro'][$i] . "</p>\n";
+			}
+?>
+		<form action="<?= TL_SCRIPT ?>?do=isobackup&action=upload&ref=<?= $this->referer ?>" method="POST" enctype="multipart/form-data">
+			<input type="hidden" name="REQUEST_TOKEN" value="<?= REQUEST_TOKEN ?>"/>
+			<input type="hidden" name="MAX_FILE_SIZE" value="2000000" />
+			<input type="file" name="import" id="isobackup_upload" accept="application/zip" style="display: none;" onchange="submit()"/>
+			<button class="upload" onclick="document.getElementById('isobackup_upload').click();return false;"><?= $GLOBALS['TL_LANG']['tl_isobackup']['upload'] ?></button>
+		</form>
+	</div>
+	<div class="right">
+<?php
+			echo '		<p' . ($this->importReady['success'] ? '' : ' class="error"') . '>' . $GLOBALS['TL_LANG']['tl_isobackup'][$this->importReady['code']] . "</p>\n";
+			if ($this->importReady['message']) {
+				echo '		<p>' . $GLOBALS['TL_LANG']['tl_isobackup']['error message'] . ': ' . $this->importReady['message'] . "</p>\n";
+			}
+			if ($this->importReady['ts']) {
+				echo '		<p title="' . date('r', $this->importReady['ts']) . '">';
+				if ($this->importReady['file']) {
+					echo sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp'], $this->importReadyMoment, $this->importReady['file']);
+				}
+				else {
+					echo sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-noname'], $this->importReadyMoment);
+				}
+				echo "</p>\n";
+			}
+			if ($this->importReady['success']) {
+				echo '		<p><a href="' . TL_SCRIPT . '?do=isobackup&action=cleanup-upload&ref=' . $this->referer . '"><button>' . $GLOBALS['TL_LANG']['tl_isobackup']['import-remove'] . '</button></a></p>' . "\n";
+			}
+?>
+	</div>
+<?php if ($this->importReady['success']): ?>
+	<div class="analysis" id="tl_isobackup_analysis">
+		<div class="messages"><?= $GLOBALS['TL_LANG']['tl_isobackup']['analysis-empty'] ?></div>
+	</div>
+<?php endif ?>
+</div>

@@ -25,7 +25,13 @@ function my_unserialize($serialized_data) {
  *
  *
  ***/
-class Export extends \BackendModule {
+class Backup extends \BackendModule {
+
+	protected $strTemplate = 'be_isobackup';
+
+	protected $tmpDir = 'hoer_isobackup';
+	protected $exportFile = 'product_export';
+	protected $importFile = 'product_import';
 
 	/**
 	 * @property	Object	$xml_writer
@@ -584,25 +590,93 @@ class Export extends \BackendModule {
 		$this->xml_writer->endElement();
 	}
 
+	protected function prepareTmpDir() {
+
+		$dir = sys_get_temp_dir() . '/' . $this->tmpDir;
+
+		if (file_exists($dir)) {
+			if (!is_dir($dir)) {
+				unlink($dir);
+				mkdir($dir);
+			}
+		}
+		else {
+			mkdir($dir);
+		}
+
+		if (!is_dir($dir)) {
+			throw new \Error('No access to temporary directory');
+		}
+
+		return $dir;
+	}
+
+	protected function getIsotopeTimestamp($include_tableName = false) {
+
+		// List of tables which contain data for the export:
+		$db_list = [
+			'tl_iso_product',
+			'tl_iso_attribute',
+			'tl_iso_attribute_option',
+			'tl_iso_group',
+			'tl_iso_producttype',
+			'tl_iso_product_price',
+			'tl_iso_product_pricetier',
+			'tl_iso_tax_class',
+			'tl_member_group',
+			'tl_page',
+		];
+
+		$max_ts = 0;
+		$max_table = '';
+		foreach ($db_list as $table) {
+			$res = $this->Database->execute("SELECT MAX(tstamp) AS ts FROM $table")->next();
+			if ($res->ts > $max_ts) {
+				$max_ts = $res->ts;
+				$max_table = $table;
+			}
+		}
+
+		return ($include_tableName) ? [$max_ts, $max_table] : $max_ts;
+	}
+
 	/**
 	 *
 	 *
 	 **/
-	public function generate() {
-
-		// $include_contao = false;
-
-		header('Content-Type: application/xml');
-		header('Content-Disposition: inline; filename="isotope.xml"');
+	protected function createExportFile() {
 
 		$this->xml_writer = new \XMLWriter();
-		$this->xml_writer->openURI('php://output');
+
+		$dir = $this->prepareTmpDir();
+		$exportfile = "$dir/{$this->exportFile}.xml";
+		$exportzip	= "$dir/{$this->exportFile}.zip";
+		$exportts	= "$dir/{$this->exportFile}.ts";
+		$exportlock	= "$dir/{$this->exportFile}.lock";
+
+		if (file_exists($exportlock)) {
+			throw new \Error('Lockfile found');
+		}
+		$lock = rand();
+		file_put_contents($exportlock, $lock);
+		if (file_get_contents($exportlock) != $lock) {
+			throw new \Error('Writing lockfile failed');
+		}
+
+		list($max_ts, $max_table) = $this->getIsotopeTimestamp(true);
+		if (abs(time() - $max_ts) < 120) {
+			unlink($exportlock);
+			throw new \Error("Table '{$max_table}' was just altered - waiting...");
+		}
+		file_put_contents($exportts, $max_ts);
+
+		$this->xml_writer->openURI($exportfile);
 
 		$this->xml_writer->setIndent(true);
 		$this->xml_writer->startDocument('1.0', 'UTF-8');
 		$this->xml_writer->startElementNS('isotope', 'product-list', 'http://hoer-electronic.de');
 
-		$products = $this->Database->prepare('SELECT * FROM tl_iso_product p WHERE NOT p.pid > 0 ORDER BY id')->execute();
+		$products = $this->Database->prepare('SELECT * FROM tl_iso_product p WHERE NOT p.pid > 0 ORDER BY alias')->execute();
 		while ($p_data = $products->next()) {
 			// Get the product's data:
 			$p_data = $p_data->row();
@@ -638,9 +712,6 @@ class Export extends \BackendModule {
 			for ($i = -1; $i < count($variants); $i++) {
 				$this->xml_writer->startElementNS('isotope', $i == -1 ? 'main' : 'variant', null);
 				$row = ($i == -1) ? $p_data : $variants[$i];
-
-// var_dump($i, $row);continue;
-
 				if ($i >= 0) {
 					$this->xml_writer->writeAttribute('variant-index', $i);
 				}
@@ -695,15 +766,587 @@ class Export extends \BackendModule {
 
 		$this->xml_writer->endElement();
 		$this->xml_writer->flush();
-		exit;
+
+		unset($this->xml_writer);
+		$this->xml_writer = null;
+
+		try {
+			$zip = new \ZipArchive;
+			$res = $zip->open($exportzip, \ZipArchive::CREATE);
+			if ($res === true) {
+				$zip->addFile($exportfile, "{$this->exportFile}.xml");
+				$zip->close();
+			}
+		}
+		catch (\Throwable $error) {
+
+		}
+
+		unlink($exportlock);
+	}
+
+	protected function checkExportFile() {
+
+		list($max_ts, $max_table) = $this->getIsotopeTimestamp(true);
+		if (abs(time() - $max_ts) < 120) {
+			return ['success' => false, 'code' => 'create-export-abort-busy', 'message' => "Table '{$max_table}' was just altered - waiting..."];
+		}
+
+		try {
+			$dir = $this->prepareTmpDir();
+		}
+		catch (\Throwable $error) {
+			return ['success' => false, 'code' => 'create-export-failed', 'message' => $error->getMessage()];
+		}
+
+		$exportfile	= "$dir/{$this->exportFile}.xml";
+		$exportts	= "$dir/{$this->exportFile}.ts";
+		$exportlock	= "$dir/{$this->exportFile}.lock";
+
+		if (file_exists($exportlock)) {
+			return ['success' => false, 'code' => 'create-export-progressing'];
+		}
+		if (!file_exists($exportfile) || !file_exists($exportts)) {
+			try {
+				$this->createExportfile();
+			}
+			catch (\Throwable $error) {
+				return ['success' => false, 'code' => 'create-export-failed', 'message' => $error->getMessage()];
+			}
+			return ['success' => true, 'code' => 'create-export-successful', 'file' => $exportfile];
+		}
+
+		$ts = file_get_contents($exportts);
+		if (!is_numeric($ts)) {
+			try {
+				$this->createExportFile();
+			}
+			catch (\Throwable $error) {
+				return ['success' => false, 'code' => 'create-export-failed', 'message' => $error->getMessage()];
+			}
+			return ['success' => true, 'code' => 'create-export-successful', 'file' => $exportfile];
+		}
+
+		if ($max_ts == $ts) {
+			return ['success' => true, 'code' => 'create-export-ready', 'file' => $exportfile];
+		}
+
+		try {
+			$this->createExportfile();
+		}
+		catch (\Throwable $error) {
+			return ['success' => false, 'code' => 'create-export-failed', 'message' => $error->getMessage()];
+		}
+		return ['success' => true, 'code' => 'create-export-successful', 'file' => $exportfile];
+	}
+
+	protected function downloadExportFile() {
+
+		try {
+			$dir = $this->prepareTmpDir();
+			$exportzip	= "$dir/{$this->exportFile}.zip";
+			$exportfile	= "$dir/{$this->exportFile}.xml";
+			if (file_exists($exportzip)) {
+				header('Content-Type: application/zip');
+				header('Content-Disposition: attachment; filename="isotope-export.zip"');
+				readfile($exportzip);
+				exit;
+			}
+			if (file_exists($exportfile)) {
+				header('Content-Type: application/xml');
+				header('Content-Disposition: attachment; filename="isotope-export.xml"');
+				readfile($exportfile);
+				exit;
+			}
+		}
+		catch (\Throwable $error) {
+			return;
+		}
+	}
+
+	protected function checkImportFile() {
+
+		try {
+			$dir = $this->prepareTmpDir();
+		}
+		catch (\Throwable $error) {
+			return ['success' => false, 'code' => 'check-import-failed', 'message' => $error->getMessage()];
+		}
+
+		$importfile = "$dir/{$this->importFile}.xml";
+		$importts	= "$dir/{$this->importFile}.ts";
+		$importname = "$dir/{$this->importFile}.name";
+
+		$name = (file_exists($importname)) ? file_get_contents($importname) : '';
+
+		if (file_exists($importfile) && file_exists($importts)) {
+			return ['success' => true, 'code' => 'check-import-ready', 'ts' => file_get_contents($importts), 'file' => $name];
+		}
+
+		return ['success' => false, 'code' => 'check-import-missing'];
+	}
+
+	protected function uploadImportFile() {
+
+		try {
+			$dir = $this->prepareTmpDir();
+			$importfile = "$dir/{$this->importFile}.xml";
+			$importzip	= "$dir/{$this->importFile}.zip";
+			$importts	= "$dir/{$this->importFile}.ts";
+			$importname	= "$dir/{$this->importFile}.name";
+
+			if (array_key_exists('import', $_FILES) && is_uploaded_file($_FILES['import']['tmp_name'])) {
+				foreach ([$importfile, $importzip, $importts, $importname] as $file) {
+					if (file_exists($file)) {
+						unlink($file);
+					}
+					if (file_exists($file)) {
+						throw new \Error('Clean up failed');
+					}
+				}
+				switch ($_FILES['import']['type']) {
+					case 'application/zip':
+					case 'application/x-zip-compressed':
+						move_uploaded_file($_FILES['import']['tmp_name'], $importzip);
+						try {
+							$zip = new \ZipArchive;
+							if ($zip->open($importzip) === true) {
+								for ($i = 0; $i < $zip->numFiles; $i++) {
+									$filename = $zip->getNameIndex($i);
+									$fileinfo = pathinfo($filename);
+									if (strtolower($fileinfo['extension']) == 'xml') {
+										copy("zip://$importzip#$filename", $importfile);
+										break;
+									}
+								}
+								$zip->close();
+							}
+						}
+						catch (\Throwable $error) {
+
+						}
+						break;
+					case 'application/xml':
+						move_uploaded_file($_FILES['import']['tmp_name'], $importfile);
+						break;
+				}
+				if (file_exists($importfile)) {
+					file_put_contents($importts, time());
+					file_put_contents($importname, $_FILES['import']['name']);
+				}
+			}
+		}
+		catch (\Throwable $error) {
+
+		}
+	}
+
+	protected function removeImportFile() {
+
+		try {
+			$dir = $this->prepareTmpDir();
+			$importfile = "$dir/{$this->importFile}.xml";
+			$importzip	= "$dir/{$this->importFile}.zip";
+			$importts	= "$dir/{$this->importFile}.ts";
+			$importname	= "$dir/{$this->importFile}.name";
+
+			foreach ([$importfile, $importzip, $importts, $importname] as $file) {
+				if (file_exists($file)) {
+					unlink($file);
+					if (file_exists($file)) {
+						throw new \Error('Clean up failed');
+					}
+				}
+			}
+		}
+		catch (\Throwable $error) {
+
+		}
+	}
+
+	protected function xmlNodeToArray($xml_reader, $include_attributes = false, $allow_deeper = 10) {
+
+		if ($include_attributes) {
+			$a_attributes = [];
+			$s_attributes = $xml_reader->localName;
+			if ($xml_reader->hasAttributes && $xml_reader->moveToFirstAttribute()) {
+				do {
+					$a_attributes[$xml_reader->name] = $xml_reader->value;
+					$s_attributes .= '|' . str_replace([':','|'], '_', $xml_reader->name) . ':' . str_replace('|', '_', $xml_reader->value);
+				} while ($xml_reader->moveToNextAttribute());
+				$xml_reader->moveToElement();
+			}
+		}
+
+		// if ($xml_reader->nodeType != \XMLReader::ELEMENT) {
+		// 	throw new \Error('Unexpected XML structure');
+		// }
+		if ($allow_deeper <= 0) {
+			throw new \Error('XML structure is too complex');
+		}
+
+		// $xml_start_depth = $xml_reader->depth;
+		$data = null;
+		if (!$xml_reader->isEmptyElement) {
+			while (1) {
+				if (!$xml_reader->read()) {
+					throw new \Error('Unexpected end of XML structure');
+				}
+				if ($xml_reader->nodeType == \XMLReader::END_ELEMENT) {
+					// if ($xml_reader->depth != $xml_start_depth) {
+					// 	throw new \Error(sprintf('Unexpected node-end in XML-structure (%s, %d != %d) [%d]', $xml_reader->name, $xml_reader->depth, $xml_start_depth, $allow_deeper));
+					// }
+					break;
+				}
+				switch ($xml_reader->nodeType) {
+					case \XMLReader::TEXT:
+						// if ($data != null) {
+						// 	throw new \Error('Unexpected text-node in XML structure');
+						// }
+						$data = $xml_reader->value;
+						break;
+					case \XMLReader::ELEMENT:
+						if ($data == null) {
+							$data = [];
+						}
+						// if ($xml_reader->depth != $xml_start_depth + 1) {
+						// 	throw new \Error(sprintf('Unexpected node-begin in XML-structure (%s, %d, %d)', $xml_reader->name, $xml_reader->depth, $xml_start_depth));
+						// }
+						$name = $xml_reader->localName;
+						$node = $this->xmlNodeToArray($xml_reader, true, $allow_deeper - 1);
+						if ($name == 'item' && count($node['attributes']) == 1 && array_key_exists('index', $node['attributes'])) {
+							$data[$node['attributes']['index']] = $node['data'];
+						}
+						else {
+							$data[$node['name_with_attributes']] = $node['data'];
+						}
+						break;
+				}
+			}
+		}
+
+		return ($include_attributes) ? ['attributes' => $a_attributes, 'name_with_attributes' => $s_attributes, 'data' => $data] : $data;
+	}
+
+	protected function analyseImportItem() {
+
+		// Count import-items:
+		$res = $this->Database->execute('SELECT COUNT(*) as n FROM tl_isobackup WHERE import_id IS NOT NULL')->first();
+		if (!$res) {
+			throw new \Error('Can\'t determine number of import-items.');
+		}
+		$n_total = $res->n;
+		$res = $this->Database->execute('SELECT COUNT(*) as n FROM tl_isobackup WHERE status = "created" AND import_id IS NOT NULL')->first();
+		if (!$res) {
+			throw new \Error('Can\'t determine number of waiting import-items.');
+		}
+		$n_waiting = $res->n;
+
+		if ($n_waiting == 0) {
+			return 1;
+		}
+		$progress = (1 - ($n_waiting - 1) / $n_total);
+
+		// Get next import-item:
+		$item = $this->Database->execute('SELECT id, import_id, isotope_id, data, actions FROM tl_isobackup WHERE status = "created" AND import_id IS NOT NULL LIMIT 1')->first();
+		if (!$item) {
+			throw new \Error('Failed to grab waiting import-item out of database.');
+		}
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "preparing" WHERE id = ?')->execute($item->id)) {
+			throw new \Error('Failed to update status of current import-item.');
+		}
+
+		$data = [];
+		$xml = new \XMLReader;
+		if (!$xml->XML('<?xml version="1.0" encoding="UTF-8"?' . '>' . $item->data) || !$xml->read()) {
+			throw new \Error('Loading XML with XMLReader failed');
+		}
+		while ($xml->nodeType != \XMLReader::NONE) {
+			if ($xml->nodeType == \XMLReader::ELEMENT && $xml->prefix == 'isotope') {
+				switch ($xml->localName) {
+					case 'main':
+						$data['main'] = $this->xmlNodeToArray($xml);
+						break;
+					case 'variant':
+						if (!array_key_exists('variants', $data)) {
+							$data['variants'] = [];
+						}
+						if ($xml->hasAttributes && $xml->moveToAttribute('variant-index')) {
+							$i = $xml->value;
+							$xml->moveToElement();
+							$data['variants'][$i] = $this->xmlNodeToArray($xml);
+						}
+						else {
+							$data['variants'][] = $this->xmlNodeToArray($xml);
+						}
+				}
+			}
+			if (!$xml->read()) {
+				break;
+			}
+		}
+		$xml->close();
+		unset($xml);
+
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET data = ? WHERE id = ?')->execute(json_encode($data), $item->id)) {
+			throw new \Error('Failed to update data of current import-item.');
+		}
+
+		// Get alias:
+		$id = explode(':', $item->import_id, 2);
+		if (!is_array($id) || count($id) != 2 || $id[0] == '' || $id[1] == '') {
+			throw new \Error('Can\'t determine identifier of current import-item.');
+		}
+
+		// Look for matching Isotope-product:
+		switch ($id[0]) {
+			case 'alias':
+			case 'sku':
+			case 'name':
+				$isotope = $this->Database->prepare("SELECT id FROM tl_iso_product WHERE pid = 0 AND {$id[0]} = ?")->execute($id[1])->first();
+				break;
+			default:
+				throw new \Error('Identifier of current import-item has invalid type');
+		}
+		if (!$isotope) {
+			if (!$this->Database->prepare('UPDATE tl_isobackup SET actions = ?, status = "prepared" WHERE id = ?')
+						->execute(json_encode(['import-everything']), $item->id)) {
+				throw new \Error('Failed to save needed actions with current import-item.');
+			}
+			return $progress;
+		}
+		else if ($isotope->count() != 1) {
+			if (!$this->Database->prepare('UPDATE tl_isobackup SET actions = ?, status = "prepared" WHERE id = ?')
+						->execute(json_encode(['error' => 'more than one isotope-product match import-id']))) {
+				throw new \Error('Failed to save needed actions with current import-item.');
+			}
+			return $progress;
+		}
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET isotope_id = ? WHERE id = ?')->execute($isotope->id, $item->id)) {
+			throw new \Error('Failed to save found Isotope-id with current import-item.');
+		}
+
+
+
+		//
+
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "prepared" WHERE id = ?')->execute($item->id)) {
+			throw new \Error('Failed to update status of current import-item.');
+		}
+
+		return $progress;
+	}
+
+	protected function analyseImport($step) {
+
+		\System::loadLanguageFile('tl_isobackup');
+
+		$code = null;
+		$message = null;
+		$progress = null;
+		$error = null;
+		$repeat_step = false;
+
+		$step_flow = [
+			'init'				=> ['cleanup',			'analysis-started'],
+			'cleanup'			=> ['read-xml',			'analysis-readxml'],
+			'read-xml'			=> ['analyse-import',	'analysis-import'],
+			'analyse-import'	=> ['analyse-isotope',	'analysis-isotope'],
+			'analyse-isotope'	=> ['successful',		'analysis-successful'],
+			'successful'		=> null
+		];
+
+		try {
+			switch ($step) {
+				case 'init':
+					$dir = $this->prepareTmpDir();
+					$importfile = "$dir/{$this->importFile}.xml";
+					if (!file_exists($importfile) || filesize($importfile) == 0) {
+						return ['message' => 'Can\'t find import-file or XML-data empty.'];
+					}
+					$progress = 0;
+					break;
+				case 'cleanup':
+					$this->Database->execute('DELETE FROM tl_isobackup');
+					$this->Database->execute('ALTER TABLE tl_isobackup DROP id');
+					$this->Database->execute('ALTER TABLE tl_isobackup ADD id int(10) unsigned NOT NULL auto_increment primary key first');
+					$this->Database->prepare('INSERT INTO tl_isobackup (status,data,tstamp) VALUES (?,?,?)')->execute("setup", json_encode(['ts' => time(), 'status' => 'analysing']), time());
+					$progress = 2;
+					break;
+				case 'read-xml':
+					$dir = $this->prepareTmpDir();
+					$importfile = "$dir/{$this->importFile}.xml";
+					$xml = new \XMLReader;
+					if (!$xml->open("file://$importfile") || !$xml->read()) {
+						throw new \Error("Opening XML with XMLReader failed");
+					}
+					while ($xml->nodeType != \XMLReader::NONE) {
+						if ($xml->nodeType == \XMLReader::ELEMENT) {
+							if ($xml->name == 'isotope:product') {
+								$element = $xml->readOuterXml();
+								$xml->moveToAttribute('id');
+								$id = $xml->value;
+								$xml->moveToAttribute('id-type');
+								$id_type = $xml->value;
+								$xml->moveToElement();
+								$this->Database
+									->prepare('INSERT INTO tl_isobackup (status,import_id,data,tstamp) VALUES (?,?,?,?)')
+									->execute('created',"$id_type:$id",$element,time());
+								if ($xml->next()) {
+									continue;
+								}
+								else {
+									break;
+								}
+							}
+						}
+						if (!$xml->read()) {
+							break;
+						}
+					}
+					$xml->close();
+					$progress = 10;
+					break;
+				case 'analyse-import':
+					$sub_progress = $this->analyseImportItem();
+					$repeat_step = ($sub_progress < 1);
+					$progress = 10 + 60 * $sub_progress;
+					break;
+				case 'analyse-isotope':
+					$progress = 100;
+					break;
+				case 'successful':
+					break;
+				case 'test':
+					$dir = $this->prepareTmpDir();
+					$importfile = "$dir/{$this->importFile}.xml";
+					$xml = new \XMLReader;
+					if (!$xml->open("file://$importfile") || !$xml->read()) {
+						throw new \Error("Opening XML with XMLReader failed");
+					}
+					for ($i = 0; $i < 1000; $i++) {
+						if ($xml->nodeType == \XMLReader::NONE) {
+							break;
+						}
+						echo sprintf('<p>%d [%d] %s: %s</p>', $xml->depth, $xml->nodeType, $xml->name, $xml->value);
+						if (!$xml->read()) {
+							break;
+						}
+					}
+					$xml->close();
+					break;
+				default:
+					return ['message' => "Error: Invalid analysis-step ($step)", 'progress' => 100];
+			}
+		}
+		catch (\Throwable $error) {
+			return ['message' => 'Error: ' . $error->getMessage()];
+		}
+
+		$res = [];
+		if ($repeat_step) {
+			$res['next_step'] = $step;
+		}
+		elseif (is_array($step_flow[$step]) && count($step_flow[$step]) >= 2) {
+			if ($step_flow[$step][0]) {
+				$res['next_step'] = $step_flow[$step][0];
+			}
+			if ($message) {
+				$res['message'] = $message;
+			}
+			elseif ($code || $step_flow[$step][1]) {
+				$res['message'] = $GLOBALS['TL_LANG']['tl_isobackup'][$code ? $code : $step_flow[$step][1]];
+			}
+		}
+		if ($progress || $progress === 0) {
+			$res['progress'] = $progress;
+		}
+		return $res;
 	}
 
 	/**
+	 * Generate the module's output
 	 *
-	 *
+	 * @return	string
+	 */
+	public function generate() {
+
+		switch (\Input::get('action')) {
+			case 'download':
+				$this->downloadExportFile();
+				break;
+			case 'upload':
+				$this->uploadImportFile();
+				break;
+			case 'cleanup-upload':
+				$this->removeImportFile();
+				break;
+			case 'analysis':
+				if (\Input::get('step')) {
+					die(json_encode($this->analyseImport(\Input::get('step'))));
+				}
+				break;
+		}
+
+		if (!$this->Template->lexA) {
+			$this->Template->lexA = "generate";
+		}
+		else {
+			$this->Template->lexA .= ",generate";
+		}
+
+		// $return = [
+		// 	'introduction' => [],
+		// ];
+
+		// if (\BackendUser::getInstance()->isAdmin) {
+        //     $objTemplate = new \BackendTemplate('be_isobackup_introduction');
+
+		// 	$return['introduction']['label'] = &$GLOBALS['TL_LANG']['tl_isobackup']['title_legend'];
+        //     $return['introduction']['html']  = $objTemplate->parse();
+		// }
+
+		$GLOBALS['TL_CSS'][] = 'bundles/hoerelectroniccontaoimport/style.css';
+		$GLOBALS['TL_JAVASCRIPT'][] = 'bundles/hoerelectroniccontaoimport/fx.js';
+		\System::loadLanguageFile('tl_isobackup');
+
+		return parent::generate();
+	}
+
+	/**
+	 * This function prepares data which is needed by the template $strTemplate.
+	 * The data has to be stored as properties of $this->Template.
 	 **/
 	protected function compile() {
+		$this->Template->referer = \Input::get('ref');
+		$this->Template->exportReady = $this->checkExportFile();
+		$this->Template->importReady = $this->checkImportFile();
 
-		return '';
+		if ($this->Template->importReady['ts']) {
+			$this->Template->importReadyMoment = sprintf(
+				$GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-date'],
+				date('r', $this->Template->importReady['ts'])
+			);
+			$diff = time() - $this->Template->importReady['ts'];
+			if ($diff <= 120) {
+				$this->Template->importReadyMoment = sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-seconds'], $diff);
+			}
+			else if ($diff <= 120 * 60) {
+				$this->Template->importReadyMoment = sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-minutes'], floor($diff / 60));
+			}
+			else if ($diff <= 48 * 3600) {
+				$this->Template->importReadyMoment = sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-hours'], floor($diff / 3600));
+			}
+			else if ($diff <= 14 * 86400) {
+				$this->Template->importReadyMoment = sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-days'], floor($diff / 86400));
+			}
+		}
+
+		if (!$this->Template->lexA) {
+			$this->Template->lexA = "compile";
+		}
+		else {
+			$this->Template->lexA .= ",compile";
+		}
 	}
 }
