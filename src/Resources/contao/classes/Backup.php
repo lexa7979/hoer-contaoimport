@@ -404,21 +404,40 @@ class Backup extends \BackendModule {
 
 		$prices = [];
 
-		$res1 = $this->Database->prepare('SELECT id, tax_class, member_group FROM tl_iso_product_price WHERE pid = ?')->execute($product_id);
-		while ($p1 = $res1->next()) {
-			$res2 = $this->Database->prepare('SELECT id, min, price FROM tl_iso_product_pricetier WHERE pid = ?')->execute($p1->id);
-			while ($p2 = $res2->next()) {
-				$p = array_filter([
-					'price'			=> $p2->price,
-					'min'			=> $p2->min,
-					'tax_class'		=> $this->getTaxClass($p1->tax_class),
-					'member_group'	=> $this->getMemberGroup($p1->member_group),
-				]);
-				if ($include_ids) {
-					$p['contao-id:price']		= $res1->id;
-					$p['contao-id:pricetier']	= $res2->id;
+		$res1 = $this->Database->prepare('SELECT id, tax_class, member_group FROM tl_iso_product_price WHERE pid = ? ORDER BY member_group')->execute($product_id);
+		while ($res1->next()) {
+			$group = 'group';
+			if ($res1->member_group) {
+				$group .= '|members:' . $this->getMemberGroup($res1->member_group);
+			}
+			if ($res1->tax_class) {
+				$group .= '|tax-class:' . $this->getTaxClass($res1->tax_class);
+			}
+			$res2 = $this->Database->prepare('SELECT id, min, price FROM tl_iso_product_pricetier WHERE pid = ? ORDER BY min')->execute($res1->id);
+			while ($res2->next()) {
+				if (!array_key_exists($group, $prices)) {
+					$prices[$group] = [];
+					// if ($res1->tax_class) {
+					// 	$prices[$group]['tax-class'] = $this->getTaxClass($res1->tax_class);
+					// }
+					if ($include_ids) {
+						$prices[$group]['contao-data'] = ['id-price' => $res1->id];
+					}
 				}
-				$prices[] = $p;
+				$prices[$group]['price|min:' . $res2->min] = $res2->price;
+				if ($include_ids) {
+					$prices[$group]['contao-data']['id-pricetier|min:' . $res2->min] = $res2->id;
+				}
+				// $p = array_filter([
+				// 	'min'			=> $res2->min,
+				// 	'price'			=> $res2->price,
+				// 	// 'tax_class'		=> $this->getTaxClass($res1->tax_class),
+				// ]);
+				// if ($include_ids) {
+				// 	$p['contao-id:price']		= $res1->id;
+				// 	$p['contao-id:pricetier']	= $res2->id;
+				// }
+				// $prices[$group][] = $p;
 			}
 		}
 
@@ -450,6 +469,7 @@ class Backup extends \BackendModule {
 		foreach (['alias', 'name', 'sku'] as $key) {
 			if (array_key_exists($key, $product_main) && is_string($product_main[$key])) {
 				$product_identifier = [$key, $product_main[$key]];
+				break;
 			}
 		}
 		if (!$product_identifier) {
@@ -1153,6 +1173,260 @@ class Backup extends \BackendModule {
 		return $item_count['progress_next'];
 	}
 
+
+	protected $importItem = null;
+		// protected $importItem = [
+		// 	'name'			=> 'Test',
+		// 	'description'	=> 'Dies ist die Beschreibung',
+		// 	'data'			=> ['b'	=> '123', 'c' => '456', 'd' => '456'],
+		// 	'variants'		=> [
+		// 		['sku'	=> '123-0001', 'name'	=> 'Product one'],
+		// 		['sku'	=> '123-0004', 'name'	=> 'Product four'],
+		// 		['sku'	=> '123-0002', 'name'	=> 'Product two'],
+		// 		['sku'	=> '123-0003', 'name'	=> 'Product three'],
+		// 	]
+		// ];
+	protected $importProduct = null;
+		// protected $importProduct = [
+		// 	'name'			=> 'Test',
+		// 	'description'	=> 'This is the description',
+		// 	'data'			=> ['a'	=> '123', 'c' => '456', 'd' => '123'],
+		// 	'variants'		=> [
+		// 		['sku'	=> '123-0005', 'name'	=> 'Product five'],
+		// 		['sku'	=> '123-0002', 'name'	=> 'Product two'],
+		// 		['sku'	=> '123-0001', 'name'	=> 'Product none'],
+		// 		['sku'	=> '123-0003', 'name'	=> 'Product three'],
+		// 	]
+		// ];
+	protected $importActions = [];
+
+	protected function importCollectActions($path = [], $isotope_path = null, $contao_data = null) {
+
+		// Apply paths to import data and Isotope data:
+		$import_data = $this->importItem;
+		$isotope_data = $this->importProduct;
+		$p_depth = count($path);
+		if ($isotope_path && count($isotope_path) > $p_depth) {
+			$p_depth = count($isotope_path);
+		}
+		for ($i = 0; $i < $p_depth; $i++) {
+			if ($i < count($path)) {
+				$import_data = $import_data[$path[$i]];
+			}
+			if ($isotope_path) {
+				if ($i < count($isotope_path)) {
+					$isotope_data = $isotope_data[$isotope_path[$i]];
+				}
+			}
+			elseif ($i < count($path)) {
+				$isotope_data = $isotope_data[$path[$i]];
+			}
+		}
+
+		// Check for current contao-IDs:
+		$new_contao_data = [];
+		foreach ($isotope_data as $k => $v) {
+			if (substr($k, 0, 7) == "contao-") {
+				$new_contao_data[$k] = $v;
+			}
+		}
+		if (count($new_contao_data)) {
+			$contao_data = $new_contao_data;
+		}
+
+		foreach (array_unique(array_merge(array_keys($import_data), array_keys($isotope_data))) as $key) {
+			if (substr($key, 0, 7) == "contao-" || (count($path) == 0 && $key == 'identifier')) {
+				continue;
+			}
+			// Compare current value of import data and Isotope data:
+			$action = null;
+			if (array_key_exists($key, $import_data) && array_key_exists($key, $isotope_data)) {
+				if (is_array($import_data[$key]) && is_array($isotope_data[$key])) {
+					switch ($key) {
+
+						case 'variants':
+							// The variants' order in the import file may be different from the order in the database,
+							// therefore we match them manually by their stock keeping unit:
+							$used_k_isotope = [];
+							foreach ($import_data['variants'] as $k_import => $v_import) {
+								$k_isotope = null;
+								foreach ($isotope_data['variants'] as $k => $v_isotope) {
+									if (
+										array_key_exists('sku', $v_import) &&
+										array_key_exists('sku', $v_isotope) &&
+										$v_import['sku'] == $v_isotope['sku']
+									) {
+										$k_isotope = $k;
+										break;
+									}
+								}
+								if ($k_isotope === null) {
+									// (Product variant from import record wasn't found in database.)
+									$this->importActions[] = ['type' => 'add-variant', 'new' => json_encode($v_import)];
+
+								}
+								else {
+									if (array_search($k_isotope, $used_k_isotope) !== false) {
+										throw new \Error('Failed to match variants between import and database: Double match.');
+									}
+									// (Match found.)
+									$variant_contao_data = [];
+									foreach ($isotope_data['variants'][$k_isotope] as $k => $v) {
+										if (substr($k, 0, 7) == "contao-") {
+											$variant_contao_data[$k] = [$v];
+										}
+									}
+									$used_k_isotope[] = $k_isotope;
+									$this->importCollectActions(
+										array_merge($path, ['variants', $k_import]),
+										array_merge(($isotope_path) ? $isotope_path : $path, ['variants', $k_isotope]),
+										(count($variant_contao_data)) ? $variant_contao_data : $contao_data
+									);
+								}
+							}
+							foreach ($isotope_data['variants'] as $k_isotope => $v_isotope) {
+								if (array_search($k_isotope, $used_k_isotope) === false) {
+									// (Product variant from database is missing in import record.)
+									$this->importActions[] = ['type' => 'remove-variant', 'old' => json_encode($v_isotope)];
+								}
+							}
+							break;
+
+						default:
+							$this->importCollectActions(array_merge($path, [$key]), null, $contao_data);
+							break;
+					}
+					continue;
+				}
+				if (is_scalar($import_data[$key]) && is_scalar($isotope_data[$key])) {
+					if ((string) $import_data[$key] === (string) $isotope_data[$key]) {
+						continue;
+					}
+				}
+				// (Current data differs.)
+				$action = 'update';
+			}
+			elseif (array_key_exists($key, $import_data)) {
+				// (Current data is missing in database record.)
+				$action = 'add';
+			}
+			else {
+				// (Current data is missing in import record.)
+				$action= 'remove';
+			}
+
+			// Generate needed action for current item:
+			if ($action) {
+				$a = [
+					'type'	=> $action,
+					'key'	=> $key,
+					'path'	=> $path,
+				];
+				if ($action == 'update' || $action == 'remove') {
+					if (is_array($isotope_data[$key])) {
+						$a['old'] = [];
+						foreach ($isotope_data[$key] as $k => $v) {
+							if (substr($k, 0, 7) != 'contao-') {
+								$a['old'][$k] = $v;
+							}
+						}
+					}
+					else {
+						$a['old'] = $isotope_data[$key];
+					}
+				}
+				if ($action == 'add' || $action == 'update') {
+					$a['new'] = $import_data[$key];
+				}
+				if ($contao_data) {
+					foreach ($contao_data as $k => $v) {
+						$a[$k] = $v;
+					}
+				}
+				if (!array_key_exists('collected', $this->importActions)) {
+					$this->importActions['collected'] = [];
+				}
+				$this->importActions['collected'][] = $a;
+			}
+		}
+	}
+
+	protected function importParseActions() {
+
+		$supported_actions = (array_key_exists('supported', $this->importActions)) ? $this->importActions['supported'] : [];
+		$unsupported_actions = (array_key_exists('unsupported', $this->importActions)) ? $this->importActions['unsupported'] : [];
+
+		if (!array_key_exists('collected', $this->importActions)) {
+			return;
+		}
+
+		foreach ($this->importActions['collected'] as $action) {
+			$key_parts = explode('|', $action['key']);
+			$handled = false;
+			switch ($key_parts[0]) {
+				case 'price':
+					$min = null;
+					for ($i = 1; $i < count($key_parts); $i++) {
+						if (substr($key_parts[$i], 0, 4) == 'min:') {
+							$min = intval(substr($key_parts[$i], 4));
+							break;
+						}
+					}
+					if ($action['type'] == 'update') {
+						if ($min && array_key_exists('contao-data', $action) && array_key_exists("id-pricetier|min:$min", $action['contao-data'])) {
+							$member_group = "default";
+							$tax_class = "default";
+							for ($i = count($action['path']) - 1; $i >= 0; $i--) {
+								if (substr($action['path'][$i], 0, 6) == 'group|') {
+									foreach (explode('|', $action['path'][$i]) as $s) {
+										if (substr($s, 0, 8) == 'members:') {
+											$member_group = substr($s, 8);
+										}
+										if (substr($s, 0, 10) == 'tax-class:') {
+											$tax_class = substr($s, 10);
+										}
+									}
+								}
+							}
+							$supported_actions[] = [
+								'group' => 'prices',
+								'sql' => [
+									'UPDATE tl_iso_pricetier SET price = ? WHERE id = ?',
+									floatval($action['new']),
+									$action['contao-data']["id-pricetier|min:$min"]
+								],
+								'text' => [
+									'Change price from %s to %s (minimum quantitiy: %s, member group: %s, tax class: %s)',
+									$action['old'],
+									$action['new'],
+									$min,
+									$member_group,
+									$tax_class
+								],
+								// 'data' => $action,
+							];
+						}
+					}
+					break;
+				case 'name':
+				case 'description':
+					break;
+			}
+			if (!$handled) {
+				$unsupported_actions[] = $action;
+			}
+		}
+
+		$this->importActions = [];
+		if (count($supported_actions)) {
+			$this->importActions['supported'] = $supported_actions;
+		}
+		if (count($unsupported_actions)) {
+			$this->importActions['unsupported'] = $unsupported_actions;
+		}
+	}
+
+
 	protected function importAnalyseNextItem() {
 
 		$item_count = $this->importCountItems('prepared', 'analysed');
@@ -1332,8 +1606,23 @@ class Backup extends \BackendModule {
 					$progress = 100;
 					break;
 				case 'test':
-					var_dump($this->collectCompleteProductData(16, true));
+					echo "<pre>";
+
+					$this->importItem = json_decode($this->Database->execute('SELECT data FROM tl_isobackup WHERE isotope_id = 16')->first()->data, true);
+					$this->importProduct = $this->collectCompleteProductData(16, true);
+					$this->importCollectActions();
+					$this->importParseActions();
+					$this->Database->prepare('UPDATE tl_isobackup SET actions = ? WHERE isotope_id = 16')->execute(json_encode($this->importActions));
+					// var_dump(array("importItem", $this->importItem));
+					// var_dump(array("importProduct", $this->importProduct));
+
+					// $this->importCollectActions();
+					// var_dump(array("actions", $this->importActions));
+
+					// var_dump($this->collectCompleteProductData(16, true));
+
 					// var_dump(json_decode($this->Database->execute('SELECT data FROM tl_isobackup WHERE isotope_id = 16')->first()->data, true));
+					echo "</pre>";
 					exit;
 				default:
 					return ['message' => "Error: Invalid analysis-step ($step)", 'progress' => 100];

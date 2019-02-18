@@ -32,7 +32,7 @@ $GLOBALS['TL_DCA']['tl_isobackup'] = [
 			'sql'			=> 'mediumtext',
 		],
 		'actions'	=> [
-			'sql'			=> 'text',
+			'sql'			=> 'mediumtext',
 		],
 		'tstamp'	=> [
 			'sql'			=> 'int(10) unsigned NOT NULL DEFAULT 0',

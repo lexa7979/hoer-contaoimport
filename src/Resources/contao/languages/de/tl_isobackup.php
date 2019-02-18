@@ -14,6 +14,8 @@ $new_items = [
 	'import-intro'	=> [
 		'Produkte wiederherstellen',
 		'Laden Sie eine Exportdatei im ZIP-Format hoch. Diese wird dann analysiert und Sie können ggf. Änderungen am eingerichteten Shop automatisiert vornehmen lassen.',
+		'Der Import funktioniert aktuell nur dann problemlos, wenn jedes Produkt einen eindeutigen Alias hat und der Alias seit dem Export nicht verändert wurde. Sollte es Produktvarianten geben, werden diese über die Artikelnummer identifiziert - diese muss daher ebenfalls eindeutig und unverändert sein.',
+		'Die Analyse zeigt Unterschiede zwischen den Importdaten und den aktuellen Produktdaten auf. Das Einpflegen der Importdaten wird gerade ausgebaut - aktuell gibt es nur für eine Auswahl an Unterschieden die Möglichkeit, die Produktdaten automatisch anpassen zu lassen.',
 	],
 
 	'create-export-abort-busy'	=> 'Der Export wurde zeitweise deaktiviert: Vor kurzem wurden Änderungen an den relevanten Datentabellen in Isotope / Contao vorgenommen. Bitte versuchen Sie es etwas später noch einmal.',
