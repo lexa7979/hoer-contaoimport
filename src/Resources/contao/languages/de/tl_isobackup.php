@@ -39,6 +39,7 @@ $new_items = [
 	'analysis-empty'			=> 'Es liegen noch keine Analyseergebnisse vor.',
 	// 'analysis-progressing'		=> 'Die Importdaten werden gerade analysiert... Laden Sie die Seite neu um herauszufinden, ob die Analyse bereits abgeschlossen wurde.',
 	'analysis-started'			=> 'Beginne die Analyse der Importdaten...',
+	'analysis-continue'			=> 'Die Analyse der Importdaten wird fortgesetzt...',
 	'analysis-readxmlfile'		=> 'Die XML-Daten werden eingelesen...',
 	'analysis-readxmldata'		=> 'Die Produktdaten aus der Importdatei werden aufbereitet.',
 	'analysis-import'			=> 'Die Produktdaten aus der Importdatei werden verarbeitet.',

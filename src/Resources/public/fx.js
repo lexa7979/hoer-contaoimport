@@ -1,10 +1,20 @@
 
-window.addEventListener("load", () => {
+function isobackup_prepareUrl(new_parameters) {
 
 	const url_parts = /^([^?]+)(?:\?(.*))?$/.exec(window.location.href);
 	if (!url_parts) {
-		return;
+		throw new Error("isobackup_prepareUrl(): Can't determine URL parts");
 	}
+
+	const script = url_parts[1];
+	const script_parameters = (url_parts.length > 2) ? url_parts[2].split('&').filter(p => p.substr(0, 7) !== 'action=').join('&') : "";
+
+	return `${script}?` + (script_parameters ? `${script_parameters}&` : "") + new_parameters;
+}
+
+window.addEventListener("load", () => {
+
+	const new_url = isobackup_prepareUrl("action=analysis");
 
 	const e_analysis = document.getElementById("tl_isobackup_analysis");
 	if (e_analysis == null) {
@@ -26,17 +36,6 @@ window.addEventListener("load", () => {
 	const messages = document.createElement("div");
 	messages.className = "messages";
 	e_analysis.appendChild(messages);
-
-	const script = url_parts[1];
-	const script_parameters = url_parts[2].split('&').filter(p => p.substr(0, 7) !== 'action=').join('&');
-
-	let new_url = script;
-	if (script_parameters !== '') {
-		new_url += `?${script_parameters}&action=analysis`;
-	}
-	else {
-		new_url += `?action=analysis`;
-	}
 
 	const analyze = function analyze_recursive(url_prefix, step = "init") {
 		fetch(url_prefix + "&step=" + step)
@@ -63,3 +62,105 @@ window.addEventListener("load", () => {
 
 	analyze(new_url);
 });
+
+function isobackup_update(item_id, action_index) {
+
+	const new_url = isobackup_prepareUrl(`action=import-action&item=${item_id}&index=${action_index}`);
+
+	const element = document.getElementById(`isobackup_updatebutton_${item_id}_${action_index}`);
+	if (!element) {
+		throw new Error("isobackup_update(): Can't locate button");
+	}
+
+	return fetch(new_url)
+		.then(response => response.json())
+		.then(result => {
+			if (result.success) {
+				const new_element = document.createElement("div");
+				new_element.className = "done";
+				new_element.innerHTML = "Done";
+				element.replaceWith(new_element);
+			}
+			else {
+				const new_element = document.createElement("div");
+				new_element.className = "error";
+				new_element.title = (result.message) ? result.message : "Unknown error";
+				new_element.innerHTML = "Failed";
+				element.replaceWith(new_element);
+			}
+
+		})
+		.catch(error => {
+			console.error(error);
+		});
+}
+
+let isobackup_update_group_active = {};
+let isobackup_update_group_remains = {};
+function isobackup_update_group(group, totalnumber) {
+
+	const new_url = isobackup_prepareUrl(`action=import-group&group=${group}`);
+
+	const element = document.getElementById(`isobackup_updatebutton_${group}`);
+	if (!element) {
+		throw new Error("isobackup_update(): Can't locate button");
+	}
+
+	if (!isobackup_update_group_active.hasOwnProperty(group)) {
+		isobackup_update_group_active[group] = false;
+	}
+	if (isobackup_update_group_active[group]) {
+		console.log("deactivating...");
+		element.className = null;
+		isobackup_update_group_active[group] = false;
+		return;
+	}
+
+	isobackup_update_group_active[group] = true;
+
+	if (!isobackup_update_group_remains.hasOwnProperty(group)) {
+		isobackup_update_group_remains[group] = totalnumber;
+	}
+
+	element.className = "busy";
+	// element.disabled = true;
+
+	const importGroup = function importGroup_recursive() {
+		fetch(new_url)
+			.then(response => response.json())
+			.then(result => {
+				if (result.success) {
+					isobackup_update_group_remains[group]--;
+					if (isobackup_update_group_remains[group] > 0) {
+						element.innerHTML = element.innerHTML.replace(/\d+/, parseInt(isobackup_update_group_remains[group]));
+						if (isobackup_update_group_active[group]) {
+							window.setTimeout(importGroup_recursive, 10);
+						}
+					}
+					else {
+						element.remove();
+						isobackup_update_group_active[group] = false;
+						// const new_element = document.createElement("div");
+						// new_element.className = "done";
+						// new_element.innerHTML = "Done";
+						// element.replaceWith(new_element);
+					}
+				}
+				else {
+					isobackup_update_group_active[group] = false;
+					const new_element = document.createElement("div");
+					new_element.className = "error";
+					new_element.title = (result.message) ? result.message : "Unknown error";
+					new_element.innerHTML = "Failed";
+					element.replaceWith(new_element);
+				}
+			})
+			.catch(error => {
+				isobackup_update_group_active[group] = false;
+				console.error(error);
+			});
+	};
+
+	importGroup();
+}
+

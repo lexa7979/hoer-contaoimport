@@ -27,6 +27,80 @@ function my_unserialize($serialized_data) {
 	return ($s == $serialized_data) ? $d : $serialized_data;
 }
 
+
+/**
+ * This function takes two strings and compares them.
+ *
+ * The result is a string which contains the content of both strings
+ * and selections of those string-parts which were removed or added in $new_string.
+ *
+ * The strings may contain HTML-tags which will be escaped using htmlspecialchars().
+ *
+ * The algorithm was taken from https://github.com/paulgb/simplediff
+ *
+ * @param $old_string
+ *		original string, e.g. "<p>Berlin is the capital of Germany.</p>"
+ * @param $new_string
+ *		updated string, e.g. "<p>Berlin is the home of 3.5 million people.</p>"
+ * @return
+ *		string describing the changes in $new_string when compared to $old_string,
+ *			e.g. "&lt;p&gt;Berlin is the <del>capital of Germany</del><ins>home of 3.5 million people</ins>.&lt;/p&gt;"
+ */
+function my_htmlStringDiff($old_string, $new_string) {
+	$recursion = function($old_array, $new_array) use (&$recursion) {
+		$maxlen = 0;
+		$matrix = [];
+		foreach ($old_array as $oindex => $oitem) {
+			if (!array_key_exists($oindex, $matrix)) {
+				$matrix[$oindex] = [];
+			}
+			$nkeys = array_keys($new_array, $oitem);
+			foreach ($nkeys as $nindex) {
+				if (array_key_exists($oindex - 1, $matrix) && array_key_exists($nindex - 1, $matrix[$oindex - 1])) {
+					$matrix[$oindex][$nindex] = $matrix[$oindex - 1][$nindex - 1] + 1;
+				} else {
+					$matrix[$oindex][$nindex] = 1;
+				}
+				if ($matrix[$oindex][$nindex] > $maxlen) {
+					$maxlen = $matrix[$oindex][$nindex];
+					$omax = $oindex + 1 - $maxlen;
+					$nmax = $nindex + 1 - $maxlen;
+				}
+			}
+		}
+
+		if ($maxlen == 0) {
+			return [['d' => $old_array, 'i' => $new_array]];
+		} else {
+			return array_merge(
+				$recursion(array_slice($old_array, 0, $omax), array_slice($new_array, 0, $nmax)),
+				array_slice($new_array, $nmax, $maxlen),
+				$recursion(array_slice($old_array, $omax + $maxlen), array_slice($new_array, $nmax + $maxlen))
+			);
+		}
+	};
+
+	try {
+		$diff = $recursion(preg_split("/\b/", $old_string), preg_split("/\b/", $new_string));
+	}
+	catch (\Throwable $error) {
+		return "<del>$old_string</del><ins>$new_string</ins>";
+	}
+
+	$result = '';
+	foreach ($diff as $k) {
+		if (is_array($k)) {
+			$result .= (array_key_exists('d', $k) && count($k['d'])) ? "<del>" . htmlspecialchars(implode('', $k['d'])) . "</del>" : '';
+			$result .= (array_key_exists('i', $k) && count($k['i'])) ? "<ins>" . htmlspecialchars(implode('', $k['i'])) . "</ins>" : '';
+		}
+		else {
+			$result .= htmlspecialchars($k);
+		}
+	}
+
+	return $result;
+}
+
 /***
  *
  *
@@ -614,8 +688,8 @@ class Backup extends \BackendModule {
 		$max_table = '';
 		foreach ($db_list as $table) {
 			$res = $this->Database->execute("SELECT MAX(tstamp) AS ts FROM $table")->next();
-			if ($res->ts > $max_ts) {
-				$max_ts = $res->ts;
+			if (intval($res->ts) > $max_ts) {
+				$max_ts = intval($res->ts);
 				$max_table = $table;
 			}
 		}
@@ -873,8 +947,18 @@ class Backup extends \BackendModule {
 
 		$name = (file_exists($importname)) ? file_get_contents($importname) : '';
 
-		if (file_exists($importfile) && file_exists($importts)) {
-			return ['success' => true, 'code' => 'check-import-ready', 'ts' => file_get_contents($importts), 'file' => $name];
+		if (
+			file_exists($importfile) &&
+			file_exists($importts) &&
+			filesize($importfile) > 0
+		) {
+			return [
+				'success' => true,
+				'code' => 'check-import-ready',
+				'ts' => file_get_contents($importts),
+				'file' => $importfile,
+				'name' => $name
+			];
 		}
 
 		return ['success' => false, 'code' => 'check-import-missing'];
@@ -1067,8 +1151,13 @@ class Backup extends \BackendModule {
 			'created'		=> 0,
 			'prepared'		=> 0,
 			'analysed'		=> 0,	// Final state
+			'failed'		=> 0,
+			'other_states'	=> [],	// List of found states which are not listed here, e.g. 'preparing', 'analysing'
+
 			'total'			=> 0,
-			'other_states'	=> [],	// List of found states which are not listed here, e.g. 'preparing'
+
+			'progress'      => 1,
+			'progress_next' => 1,
 		];
 
 		$res = $this->Database->execute('SELECT status, COUNT(*) as n FROM tl_isobackup WHERE import_id IS NOT NULL GROUP BY status')->first();
@@ -1085,28 +1174,19 @@ class Backup extends \BackendModule {
 		} while ($res->next());
 
 		if ($progressing_from && $progressing_to) {
-			if (array_key_exists($progressing_from, $item_count) && $item_count[$progressing_from] > 0) {		// e.g. count(created) between 1 and 10
-				if (array_key_exists($progressing_to, $item_count) && $item_count[$progressing_to] > 0) {	// e.g. count(created) == 3, count(prepared) == 7
+			if (array_key_exists($progressing_from, $item_count) && $item_count[$progressing_from] > 0) {
+				// e.g. count(created) between 1 and 10
+				if (array_key_exists($progressing_to, $item_count) && $item_count[$progressing_to] > 0) {
+					// e.g. count(created) == 3, count(prepared) == 7
 					$t = $item_count[$progressing_from] + $item_count[$progressing_to];
-					$item_count['progress_prev'] = ($item_count[$progressing_to] - 1) / $t;
 					$item_count['progress']      = $item_count[$progressing_to] / $t;
 					$item_count['progress_next'] = ($item_count[$progressing_to] + 1) / $t;
 				}
-				else {						// e.g. count(created) == 10, count(prepared) == 0
-					$item_count['progress_prev'] = 0;
+				else {
+					// e.g. count(created) == 10, count(prepared) == 0
 					$item_count['progress'] = 0;
 					$item_count['progress_next'] = 1 / $item_count[$progressing_from];
 				}
-			}
-			else {							// e.g. count(created) == 0
-				if (array_key_exists($progressing_to, $item_count) && $item_count[$progressing_to] > 0) {	// e.g. count(created) == 0, count(prepared) == 10
-					$item_count['progress_prev'] = 1 - 1 / $item_count[$progressing_to];
-				}
-				else {						// e.g. count(created) == 0, count(prepared) == 0
-					$item_count['progress_prev'] = 1;
-				}
-				$item_count['progress'] = 1;
-				$item_count['progress_next'] = 1;
 			}
 		}
 
@@ -1200,7 +1280,16 @@ class Backup extends \BackendModule {
 		// ];
 	protected $importActions = [];
 
-	protected function importCollectActions($path = [], $isotope_path = null, $contao_data = null) {
+	protected function importCollectActions($importItem, $isotopeProduct) {
+
+		$this->importActions = [];
+		$this->importItem = $importItem;
+		$this->importProduct = array_filter($isotopeProduct, function($value) { return ($value !== null); });
+
+		$this->importCollectActions_recursion();
+	}
+
+	protected function importCollectActions_recursion($path = [], $isotope_path = null, $contao_data = null) {
 
 		// Apply paths to import data and Isotope data:
 		$import_data = $this->importItem;
@@ -1277,7 +1366,7 @@ class Backup extends \BackendModule {
 										}
 									}
 									$used_k_isotope[] = $k_isotope;
-									$this->importCollectActions(
+									$this->importCollectActions_recursion(
 										array_merge($path, ['variants', $k_import]),
 										array_merge(($isotope_path) ? $isotope_path : $path, ['variants', $k_isotope]),
 										(count($variant_contao_data)) ? $variant_contao_data : $contao_data
@@ -1293,7 +1382,7 @@ class Backup extends \BackendModule {
 							break;
 
 						default:
-							$this->importCollectActions(array_merge($path, [$key]), null, $contao_data);
+							$this->importCollectActions_recursion(array_merge($path, [$key]), null, $contao_data);
 							break;
 					}
 					continue;
@@ -1351,20 +1440,29 @@ class Backup extends \BackendModule {
 		}
 	}
 
+	/**
+	 * This function accesses $this->importActions, parses the collected actions
+	 * and prepares some updates to Contao's database which can be done automatically.
+	 *
+	 * The content of $this->importActions will be reorganised
+	 * 		from  $this->importActions = ['collected' => ...]
+	 * 		to    $this->importActions = ['supported' => ..., 'unsupported' => ...]
+	 */
 	protected function importParseActions() {
-
-		$supported_actions = (array_key_exists('supported', $this->importActions)) ? $this->importActions['supported'] : [];
-		$unsupported_actions = (array_key_exists('unsupported', $this->importActions)) ? $this->importActions['unsupported'] : [];
 
 		if (!array_key_exists('collected', $this->importActions)) {
 			return;
 		}
 
+		$supported_actions = (array_key_exists('supported', $this->importActions)) ? $this->importActions['supported'] : [];
+		$unsupported_actions = (array_key_exists('unsupported', $this->importActions)) ? $this->importActions['unsupported'] : [];
+
 		foreach ($this->importActions['collected'] as $action) {
 			$key_parts = explode('|', $action['key']);
 			$handled = false;
 			switch ($key_parts[0]) {
-				case 'price':
+
+				case 'price':	// e.g. $action['key'] = 'price|min:5'
 					$min = null;
 					for ($i = 1; $i < count($key_parts); $i++) {
 						if (substr($key_parts[$i], 0, 4) == 'min:') {
@@ -1373,7 +1471,11 @@ class Backup extends \BackendModule {
 						}
 					}
 					if ($action['type'] == 'update') {
-						if ($min && array_key_exists('contao-data', $action) && array_key_exists("id-pricetier|min:$min", $action['contao-data'])) {
+						if (
+							$min &&
+							array_key_exists('contao-data', $action) &&
+							array_key_exists("id-pricetier|min:$min", $action['contao-data'])
+						) {
 							$member_group = "default";
 							$tax_class = "default";
 							for ($i = count($action['path']) - 1; $i >= 0; $i--) {
@@ -1391,7 +1493,7 @@ class Backup extends \BackendModule {
 							$supported_actions[] = [
 								'group' => 'prices',
 								'sql' => [
-									'UPDATE tl_iso_pricetier SET price = ? WHERE id = ?',
+									'UPDATE tl_iso_product_pricetier SET price = ? WHERE id = ?',
 									floatval($action['new']),
 									$action['contao-data']["id-pricetier|min:$min"]
 								],
@@ -1403,13 +1505,84 @@ class Backup extends \BackendModule {
 									$member_group,
 									$tax_class
 								],
-								// 'data' => $action,
+								'status'	=> 'prepared',
 							];
+							$handled = true;
 						}
 					}
 					break;
+
 				case 'name':
 				case 'description':
+					$id = (array_key_exists('contao-id', $action)) ? intval($action['contao-id']) : null;
+					if (!$id && array_key_exists('contao-data', $action) && array_key_exists('id', $action['contao-data'])) {
+						$id = intval($action['contao-data']['id']);
+					}
+					if (!$id || !count($action['path'])) {
+						break;
+					}
+					if ($action['type'] == 'update') {
+						$text = null;
+						switch ($action['path'][0]) {
+
+							case 'main':
+								// e.g. $action['path'] == ['main']  or
+								//      $action['path'] == ['main','translations','item|language:de']
+								if (count($action['path']) == 1) {
+									$text = [
+										'Change %s of product',
+										$key_parts[0]
+									];
+								}
+								elseif (
+									count($action['path']) == 3 &&
+									$action['path'][1] == 'translations' &&
+									preg_match('/language:(\w+)/', $action['path'][2], $matches)
+								) {
+									$text = [
+										'Change translated %s of product (language "%s")',
+										$key_parts[0],
+										$matches[1]
+									];
+								}
+								break;
+
+							case 'variants':
+								// e.g. $action['path'] == ['variants',1]  or
+								//      $action['path'] == ['variants',1,'translations','item|language:de']
+								if (count($action['path']) == 2) {
+									$text = [
+										'Change %s of product variant (variant-index: %d)',
+										$key_parts[0],
+										intval($action['path'][1])
+									];
+								}
+								elseif (
+									count($action['path']) == 4 &&
+									$action['path'][2] == 'translations' &&
+									preg_match('/language:(\w+)/', $action['path'][3], $matches)
+								) {
+									$text = [
+										'Change translated %s of product variant (variant-index: %d, language "%s")',
+										$key_parts[0],
+										intval($action['path'][1]),
+										$matches[1]
+									];
+								}
+								break;
+						}
+						if ($text) {
+							$text[0] = "<div><b>{$text[0]}</b></div><div class=\"diff\">%s</div>";
+							$text[] = my_htmlStringDiff($action['old'], $action['new']);
+							$supported_actions[] = [
+								'group'		=> $key_parts[0],
+								'sql'		=> ["UPDATE tl_iso_product SET {$key_parts[0]} = ? WHERE id = ?", $action['new'], $id],
+								'text'		=> $text,
+								'status'	=> 'prepared',
+							];
+							$handled = true;
+						}
+					}
 					break;
 			}
 			if (!$handled) {
@@ -1426,7 +1599,41 @@ class Backup extends \BackendModule {
 		}
 	}
 
-
+	/**
+	 * This function takes one item from table 'tl_isobackup' which has the status 'prepared'
+	 * i.e. its XML-data was already parsed but not compared against the content of Contao's database.
+	 *
+	 * - The found item is put into status 'analysing'.
+	 * - The function looks for a corresponding product in table 'tl_iso_product' and memorises its ID
+	 *   in the item's field 'isotope_id'. If no product can be found the action 'import-everything'
+	 *   is saved for the item.
+	 * - The item is analysed; all found differences to the product will be arranged
+	 *   in two arrays 'supported' and 'unsupported' and then stored in the item's field 'actions'.
+	 * - At the end the item's status becomes 'analysed'.
+	 *
+	 * The 'supported' differences contain SQL-statements and text-information describing the needed
+	 * changes to Contao's database,
+	 *      e.g.  'group' => 'name',
+	 *              'sql' => ['UPDATE ... WHERE id = ?', ..., 16],
+	 *             'text' => ['Change the %s of the product ...', 'name', ...]
+	 *
+	 * The 'unsupported' actions contain raw-data about the differences between the imported item
+	 * and Contao's data,
+	 *      e.g.  'type' => 'update',
+	 *             'key' => 'group',
+	 *            'path' => ['main'],
+	 *             'old' => 'Geldwechsler',
+	 *             'new' => 'Geld-Wechsler',
+	 *     'contao-data' => ['id' => '16', ...]
+	 *
+	 * When unexpected problems occur, the function may throw an Error.
+	 * In case of recognisable problems those will be stored with $this->analysisAddError().
+	 *
+	 * @return
+	 *		The return value represents the rate of already analysed items as a float-value between 0 and 1,
+	 *			e.g. if there are 100 items in total and 65 were already analysed the function will return 0.65
+	 *			i.e. the return-value will be 1 iff no more items need to be analysed.
+	 */
 	protected function importAnalyseNextItem() {
 
 		$item_count = $this->importCountItems('prepared', 'analysed');
@@ -1442,14 +1649,15 @@ class Backup extends \BackendModule {
 		if (!$item) {
 			throw new \Error('Failed to grab waiting import-item out of database.');
 		}
-		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "analysing" WHERE id = ?')->execute($item->id)) {
-			throw new \Error('Failed to update status of current import-item.');
-		}
 		if (!$item->data) {
 			$this->analysisAddError('empty-import-data', null, $item->id);
 			return $item_count['progress_next'];
 		}
-		$data = json_decode($item->data, true);
+
+		// Set the item's status to 'analysing':
+		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "analysing" WHERE id = ?')->execute($item->id)) {
+			throw new \Error('Failed to update status of current import-item.');
+		}
 
 		// Look for matching Isotope-product:
 		$id = explode(':', $item->import_id, 2);
@@ -1468,33 +1676,44 @@ class Backup extends \BackendModule {
 				return $item_count['progress_next'];
 		}
 		if (!$isotope) {
-			if (!$this->Database->prepare('UPDATE tl_isobackup SET actions = ?, status = "analysed" WHERE id = ?')->execute(json_encode(['import-everything']), $item->id)) {
+			if (
+				!$this->Database
+					->prepare('UPDATE tl_isobackup SET actions = ?, status = "analysed" WHERE id = ?')
+					->execute(json_encode(['import-everything']), $item->id)
+			) {
 				throw new \Error('Failed to save needed actions with current import-item.');
 			}
 			return $item_count['progress_next'];
 		}
 		else if ($isotope->count() != 1) {
 			$this->analysisAddError('too-many-product-matches', null, $item->id);
+			if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "failed" WHERE id = ?')->execute($item->id)) {
+				throw new \Error('Problems setting current import-item into state "failed".');
+			}
 			return $item_count['progress_next'];
 		}
-		if (!$this->Database->prepare('UPDATE tl_isobackup SET isotope_id = ? WHERE id = ?')->execute($isotope->id, $item->id)) {
+		if (
+			!$this->Database
+				->prepare('UPDATE tl_isobackup SET isotope_id = ? WHERE id = ?')
+				->execute($isotope->id, $item->id)
+		) {
+			$this->Database->prepare('UPDATE tl_isobackup SET status = "failed" WHERE id = ?')->execute($item->id);
 			throw new \Error('Failed to save found Isotope-id with current import-item.');
 		}
-		$isotope_data = $this->collectCompleteProductData($isotope->id);
 
 		// Compare import-data with product-data:
-		$actions = [];
-
-
-
-		// var_dump(array("main", $isotope_main, "variants", $isotope_variants)); exit;
-
-
-
-
+		$this->importCollectActions(
+			json_decode($item->data, true),
+			$this->collectCompleteProductData($isotope->id, true)
+		);
+		$this->importParseActions();
 
 		// Update import-item:
-		if (!$this->Database->prepare('UPDATE tl_isobackup SET status = "analysed" WHERE id = ?')->execute($item->id)) {
+		if (
+			!$this->Database
+				->prepare('UPDATE tl_isobackup SET actions = ?, status = "analysed" WHERE id = ?')
+				->execute((is_array($this->importActions) && count($this->importActions)) ? json_encode($this->importActions) : null, $item->id)
+		) {
 			throw new \Error('Failed to update current import-item.');
 		}
 
@@ -1509,41 +1728,106 @@ class Backup extends \BackendModule {
 		$message = null;
 		$progress = null;
 		$error = null;
-		$repeat_step = false;
+
+		$repeat_step = false;	// will be set to true iff the current step has to be repeated
 
 		$step_flow = [
-			'init'				=> ['cleanup',			'analysis-started'],
-			'cleanup'			=> ['read-xmlfile',		'analysis-readxmlfile'],
-			'read-xmlfile'		=> ['read-xmldata',		'analysis-readxmldata'],
-			'read-xmldata'		=> ['analyse-import',	'analysis-import'],
+			// current step     => [ next step,         ID of localised caption ]
+			'init'				=> ['read-init',		'analysis-started'],
+			'read-init'			=> ['read-xmlfile',		'analysis-readxmlfile'],
+			'read-xmlfile'		=> ['parse-init',		null],
+			'parse-init'		=> ['parse-xmldata',	'analysis-readxmldata'],
+			'parse-xmldata'		=> ['analyse-init',		null],
+			'analyse-init'		=> ['analyse-import',	'analysis-import'],
 			'analyse-import'	=> ['analyse-isotope',	'analysis-isotope'],
-			'analyse-isotope'	=> ['successful',		'analysis-successful'],
-			'successful'		=> null
+			'analyse-isotope'	=> ['finish',			'analysis-successful'],
+			'finish'			=> null,
+			// shortcut-steps:
+			'init-skipreading'	=> ['parse-init',		'analysis-continue'],
+			'init-skipparsing'	=> ['analyse-init',		'analysis-continue'],
+			'init-skipanalysis'	=> ['finish',			'analysis-ready']
 		];
 
 		try {
 			switch ($step) {
+
 				case 'init':
-					$dir = $this->prepareTmpDir();
-					$importfile = "$dir/{$this->importFile}.xml";
-					if (!file_exists($importfile) || filesize($importfile) == 0) {
-						return ['message' => 'Can\'t find import-file or XML-data empty.'];
+					$p = $this->importOverallProgress();
+					if ($p['analysed']) {
+						$step = 'init-skipanalysis';
 					}
+					elseif ($p['parsed']) {
+						$step = 'init-skipparsing';
+					}
+					elseif ($p['read']) {
+						$step = 'init-skipreading';
+					}
+					//--//
+						// $importfile = $this->checkImportFile();
+						// if (!$importfile['success']) {
+						// 	return ['message' => 'Can\'t find import-file or import-data is empty.'];
+						// }
+						// $progress = 0;
+						// $setup = $this->dbQueryRecord(['id' => true, 'data' => 'json-array'], 'tl_isobackup', 'status = ?', 'setup');
+						// if (
+						// 	!$setup ||
+						// 	$setup['data']['mode'] != 'import' ||
+						// 	$setup['data']['ts_importfile'] != $importfile['ts'] ||
+						// 	!$setup['data']['ts_parsing']
+						// ) {
+						// 	break;
+						// }
+						// // (Current import-file was already read before.)
+						// $step = 'init-skipreading';
+						// if ($setup['data']['ts_analysing'] < $setup['data']['ts_parsing']) {
+						// 	break;
+						// }
+						// // (Current import-file was completely parsed before.)
+						// $step = 'init-skipparsing';
+						// if ($setup['data']['ts_ready'] < $setup['data']['ts_analysing']) {
+						// 	break;
+						// }
+						// // (Current import-file was already successfully analysed before.)
+						// // Ensure that Contao's product data wasn't changed since last analysis:
+						// if ($this->getIsotopeTimestamp() + 10 > intval($setup['data']['ts_analysing'])) {
+						// 	break;
+						// }
+						// $step = 'init-skipanalysis';
+					//--//
 					$progress = 0;
 					break;
-				case 'cleanup':
-					$this->Database->execute('DELETE FROM tl_isobackup');
-					$this->Database->execute('ALTER TABLE tl_isobackup DROP id');
-					$this->Database->execute('ALTER TABLE tl_isobackup ADD id int(10) unsigned NOT NULL auto_increment primary key first');
-					$this->Database->prepare('INSERT INTO tl_isobackup (status,data,tstamp) VALUES (?,?,?)')->execute("setup", json_encode(['ts' => time(), 'mode' => 'import', 'status' => 'in progress']), time());
-					$this->Database->prepare('INSERT INTO tl_isobackup (status,tstamp) VALUES (?,?)')->execute("errors", time());
+
+				case 'read-init':
+					// Remove any data of previous imports and prepare the table 'tl_isobackup':
+					$importfile = $this->checkImportFile();
+					if (!$importfile['success']) {
+						return ['message' => 'Can\'t find import-file or import-data is empty.'];
+					}
+					$this->dbQuery('DELETE FROM tl_isobackup');
+					$this->dbQueryOptional('ALTER TABLE tl_isobackup DROP id');
+					$this->dbQuery('ALTER TABLE tl_isobackup ADD id int(10) unsigned NOT NULL auto_increment primary key first');
+					$this->dbQuery('INSERT INTO tl_isobackup (status,tstamp,data) VALUES (?,?,?)', "setup", time(), json_encode([
+						'ts_importfile'	=> $importfile['ts'],
+						'ts_init'		=> time(),
+						'ts_parsing'	=> null,
+						'ts_analysing'	=> null,
+						'ts_ready'		=> null,
+						'mode'			=> 'import',
+						'status'		=> 'busy'
+					]));
+					$this->dbQuery('INSERT INTO tl_isobackup (status,tstamp) VALUES (?,?)', "errors", time());
 					$progress = 2;
 					break;
+
 				case 'read-xmlfile':
-					$dir = $this->prepareTmpDir();
-					$importfile = "$dir/{$this->importFile}.xml";
+					// Parse the outer structure of the import's XML-file and
+					// save the unparsed XML-data of every product in the database:
+					$importfile = $this->checkImportFile();
+					if (!$importfile['success']) {
+						return ['message' => 'Can\'t find import-file or import-data is empty.'];
+					}
 					$xml = new \XMLReader;
-					if (!$xml->open("file://$importfile") || !$xml->read()) {
+					if (!$xml->open('file://' . $importfile['file']) || !$xml->read()) {
 						throw new \Error("Opening XML with XMLReader failed");
 					}
 					while ($xml->nodeType != \XMLReader::NONE) {
@@ -1561,9 +1845,7 @@ class Backup extends \BackendModule {
 								if ($xml->next()) {
 									continue;
 								}
-								else {
-									break;
-								}
+								break;
 							}
 						}
 						if (!$xml->read()) {
@@ -1573,20 +1855,62 @@ class Backup extends \BackendModule {
 					$xml->close();
 					$progress = 10;
 					break;
-				case 'read-xmldata':
+
+				case 'parse-init':
+					$importfile = $this->checkImportFile();
+					if (!$importfile['success']) {
+						return ['message' => 'Can\'t find import-file or import-data is empty.'];
+					}
+					$setup = $this->dbQueryRecord(['id' => true, 'data' => 'json-array'], 'tl_isobackup', 'status = ?', 'setup', new \Error('Failed to read setup block'));
+					if (
+						$setup['data']['mode'] != 'import' ||
+						$setup['data']['ts_importfile'] != $importfile['ts']
+					) {
+						throw new \Error('Setup data block doesn\'t match current import-file');
+					}
+					$setup['data']['ts_parsing'] = time();
+					$setup['data']['status'] = 'busy';
+					$this->dbQuery('UPDATE tl_isobackup SET data = ? WHERE id = ?', json_encode($setup['data']), $setup['id']);
+					$progress = 12;
+					break;
+
+				case 'parse-xmldata':
 					$sub_progress = $this->importPrepareNextItem();
 					$repeat_step = ($sub_progress < 1);
-					$progress = 10 + 40 * $sub_progress;
+					$progress = 12 + 38 * $sub_progress;
 					break;
+
+				case 'analyse-init':
+					$importfile = $this->checkImportFile();
+					if (!$importfile['success']) {
+						return ['message' => 'Can\'t find import-file or import-data is empty.'];
+					}
+					$setup = $this->dbQueryRecord(['id' => true, 'data' => 'json-array'], 'tl_isobackup', 'status = ?', 'setup', new \Error('Failed to read setup block'));
+					if (
+						$setup['data']['mode'] != 'import' ||
+						$setup['data']['ts_importfile'] != $importfile['ts']
+					) {
+						throw new \Error('Setup data block doesn\'t match current import-file');
+					}
+					$setup['data']['ts_analysing'] = time();
+					$setup['data']['status'] = 'busy';
+					$this->dbQuery('UPDATE tl_isobackup SET data = ? WHERE id = ?', json_encode($setup['data']), $setup['id']);
+					$progress = 52;
+					break;
+
 				case 'analyse-import':
 					$sub_progress = $this->importAnalyseNextItem();
 					$repeat_step = ($sub_progress < 1);
-					$progress = 50 + 40 * $sub_progress;
+					$progress = 52 + 38 * $sub_progress;
 					break;
+
 				case 'analyse-isotope':
-					$product = $this->Database->execute('SELECT id FROM tl_iso_product WHERE pid = 0');
+					$product = $this->Database->execute('SELECT id FROM tl_iso_product WHERE NOT pid > 0');
 					do {
-						$item = $this->Database->prepare('SELECT COUNT(*) AS n FROM tl_isobackup WHERE isotope_id = ?')->execute($product->id)->first();
+						$item = $this->Database
+							->prepare('SELECT COUNT(*) AS n FROM tl_isobackup WHERE isotope_id = ?')
+							->execute($product->id)
+							->first();
 						switch ($item->n) {
 							case 1:
 								break;
@@ -1602,28 +1926,37 @@ class Backup extends \BackendModule {
 					} while ($product->next());
 					$progress = 98;
 					break;
-				case 'successful':
+
+				case 'finish':
+					$importfile = $this->checkImportFile();
+					if (!$importfile['success']) {
+						return ['message' => 'Can\'t find import-file or import-data is empty.'];
+					}
+					$setup = $this->dbQueryRecord(['id' => true, 'data' => 'json-array'], 'tl_isobackup', 'status = ?', 'setup', new \Error('Failed to read setup block'));
+					if ($setup['data']['mode'] != 'import' || $setup['data']['ts_importfile'] != $importfile['ts']) {
+						throw new \Error('Setup data block doesn\'t match current import-file');
+					}
+					$setup['data']['ts_ready'] = time();
+					$setup['data']['status'] = 'ready';
+					$this->dbQuery('UPDATE tl_isobackup SET data = ? WHERE id = ?', json_encode($setup['data']), $setup['id']);
 					$progress = 100;
 					break;
+
 				case 'test':
 					echo "<pre>";
 
-					$this->importItem = json_decode($this->Database->execute('SELECT data FROM tl_isobackup WHERE isotope_id = 16')->first()->data, true);
-					$this->importProduct = $this->collectCompleteProductData(16, true);
-					$this->importCollectActions();
+					$item = json_decode($this->Database->execute('SELECT data FROM tl_isobackup WHERE isotope_id = 16')->first()->data, true);
+					$product = $this->collectCompleteProductData(16, true);
+					$this->importCollectActions($item, $product);
 					$this->importParseActions();
 					$this->Database->prepare('UPDATE tl_isobackup SET actions = ? WHERE isotope_id = 16')->execute(json_encode($this->importActions));
-					// var_dump(array("importItem", $this->importItem));
-					// var_dump(array("importProduct", $this->importProduct));
-
-					// $this->importCollectActions();
-					// var_dump(array("actions", $this->importActions));
 
 					// var_dump($this->collectCompleteProductData(16, true));
 
 					// var_dump(json_decode($this->Database->execute('SELECT data FROM tl_isobackup WHERE isotope_id = 16')->first()->data, true));
 					echo "</pre>";
 					exit;
+
 				default:
 					return ['message' => "Error: Invalid analysis-step ($step)", 'progress' => 100];
 			}
@@ -1653,6 +1986,241 @@ class Backup extends \BackendModule {
 		return $res;
 	}
 
+	protected function importOverallProgress() {
+
+		$progress = [
+			'uploaded'	=> false,
+			'read'		=> false,
+			'parsed'	=> false,
+			'analysed'	=> false,
+			'ready'		=> false,
+		];
+
+		$importfile = $this->checkImportFile();
+		if (!$importfile['success']) {
+			return $progress;
+		}
+		$progress['uploaded'] = true;
+
+		$setup = $this->dbQueryRecord(['id' => true, 'data' => 'json-array'], 'tl_isobackup', 'status = ?', 'setup');
+		if (
+			!$setup ||
+			$setup['data']['mode'] != 'import' ||
+			$setup['data']['ts_importfile'] != $importfile['ts'] ||
+			!$setup['data']['ts_parsing']
+		) {
+			return $progress;
+		}
+		$progress['read'] = true;
+
+		if ($setup['data']['ts_analysing'] < $setup['data']['ts_parsing']) {
+			return $progress;
+		}
+		$progress['parsed'] = true;
+
+		if ($setup['data']['ts_ready'] < $setup['data']['ts_analysing']) {
+			return $progress;
+		}
+
+		// Ensure that Contao's product data wasn't changed since last analysis:
+		if ($this->getIsotopeTimestamp() + 10 > intval($setup['data']['ts_analysing'])) {
+			return $progress;
+		}
+		$progress['analysed'] = true;
+
+		$progress['ready'] = true;
+		return $progress;
+	}
+
+	protected function importGrabAnalysis() {
+
+		$data = [];
+
+		$p = $this->importOverallProgress();
+		if (!$p['ready']) {
+			return null;
+		}
+
+		$res = $this->dbQuery('SELECT id, import_id, actions FROM tl_isobackup WHERE status = ? AND actions IS NOT NULL', 'analysed');
+
+		while ($res->next()) {
+			$d = $res->row();
+			$d['actions'] = json_decode($d['actions'], true);
+			$data[] = $d;
+		}
+
+		return $data;
+	}
+
+	protected function importDoItemAction($id, $index) {
+
+		try {
+			$updating = false;
+			$res = $this->dbQuery('SELECT actions FROM tl_isobackup WHERE id = ?', $id);
+
+			if (!$res->actions) {
+				return ['success' => false, 'message' => 'No actions found'];
+			}
+			$actionList = json_decode($res->actions, true);
+			if (
+				!$actionList ||
+				!array_key_exists('supported', $actionList) ||
+				$index >= count($actionList['supported'])
+			) {
+				return ['success' => false, 'message' => 'Can\'t read actions'];
+			}
+
+			$action = $actionList['supported'][$index];
+			if ($action['status'] != 'prepared') {
+				return ['success' => false, 'message' => 'Action is not in state "prepared"'];
+			}
+
+			$updating = true;
+			$this->dbQuery(...$action['sql']);
+			$updating = false;
+			$actionList['supported'][$index]['status'] = 'done';
+			$this->dbQuery('UPDATE tl_isobackup SET actions = ? WHERE id = ?', json_encode($actionList), $id);
+			$found = true;
+		}
+		catch (\Throwable $error) {
+			if ($updating) {
+				$actionList['supported'][$index]['status'] = 'failed';
+				$this->dbQuery('UPDATE tl_isobackup SET actions = ? WHERE id = ?', json_encode($actionList), $res->id);
+			}
+			return ['success' => false, 'message' => $error->getMessage()];
+		}
+
+		return ['success' => true];
+	}
+
+	protected function importDoNextGroupAction($group) {
+
+		try {
+			$found = false;
+			$updating = false;
+			$res = $this->dbQuery('SELECT id, actions FROM tl_isobackup WHERE import_id IS NOT NULL AND actions IS NOT NULL');
+			do {
+				$actionList = json_decode($res->actions, true);
+				if (!array_key_exists('supported', $actionList)) {
+					continue;
+				}
+				foreach ($actionList['supported'] as $index => $action) {
+					if ($action['group'] == $group && $action['status'] == 'prepared') {
+						$updating = true;
+						$this->dbQuery(...$action['sql']);
+						$updating = false;
+						$actionList['supported'][$index]['status'] = 'done';
+						$this->dbQuery('UPDATE tl_isobackup SET actions = ? WHERE id = ?', json_encode($actionList), $res->id);
+						$found = true;
+						break;
+					}
+				}
+			} while (!$found && $res->next());
+		}
+		catch (\Throwable $error) {
+			if ($updating) {
+				$actionList['supported'][$index]['status'] = 'failed';
+				$this->dbQuery('UPDATE tl_isobackup SET actions = ? WHERE id = ?', json_encode($actionList), $res->id);
+			}
+			return ['success' => false, 'message' => $error->getMessage()];
+		}
+
+		return ['success' => true];
+	}
+
+	protected function dbQuery($sql, ...$values) {
+
+		if ($values && count($values)) {
+			$res = $this->Database->prepare($sql)->execute(...$values);
+		}
+		else {
+			$res = $this->Database->execute($sql);
+		}
+
+		return (is_a($res, 'Contao\Database\Result')) ? $res->first() : $res;
+	}
+
+	protected function dbQueryOptional($sql, ...$values) {
+
+		try {
+			if ($values && count($values)) {
+				$res = $this->Database->prepare($sql)->execute(...$values);
+			}
+			else {
+				$res = $this->Database->execute($sql);
+			}
+		}
+		catch (\Throwable $error) {
+			return null;
+		}
+
+		return (is_a($res, 'Contao\Database\Result')) ? $res->first() : $res;
+	}
+
+	protected function dbQueryRecord($fields, $table, $condition, ...$values) {
+
+		if (!is_array($fields) || !count($fields) || !is_string($table) || $table == '') {
+			throw new \Error('dbQueryData(): Invalid arguments');
+		}
+
+		$error = null;
+		if ($values && count($values)) {
+			$error = array_pop($values);
+			if (!is_subclass_of($error, '\Throwable')) {
+				$values[] = $error;
+				$error = null;
+			}
+		}
+
+		$sql = 'SELECT ' . join(', ', array_keys($fields)) . " FROM $table";
+		if (is_string($condition) && $condition != '') {
+			$sql .= " WHERE $condition";
+		}
+
+		if ($values && count($values)) {
+			$res = $this->Database->prepare($sql)->execute(...$values);
+		}
+		else {
+			$res = $this->Database->execute($sql);
+		}
+
+		if (!$res || !is_a($res, 'Contao\Database\Result')) {
+			if ($error) {
+				throw $error;
+			}
+			return null;
+		}
+
+		$count = $res->count();
+		if ($count == 0) {
+			if ($error) {
+				throw $error;
+			}
+			return null;
+		}
+
+		$data = $res->row();
+		$data['rowCount'] = $count;
+		foreach ($fields as $key => $value) {
+			if ($value === true) {
+				continue;
+			}
+			switch ($value) {
+				case 'json-array':
+					$data[$key] = json_decode($data[$key], true);
+					if (!$data[$key] || !is_array($data[$key])) {
+						if ($error) {
+							throw $error;
+						}
+						return null;
+					}
+					break;
+			}
+		}
+
+		return $data;
+	}
+
 
 	/**
 	 * Generate the module's output
@@ -1674,6 +2242,16 @@ class Backup extends \BackendModule {
 			case 'analysis':
 				if (\Input::get('step')) {
 					die(json_encode($this->analyseImport(\Input::get('step'))));
+				}
+				break;
+			case 'import-action':
+				if (\Input::get('item') !== null && \Input::get('index') !== null) {
+					die(json_encode($this->importDoItemAction(\Input::get('item'), \Input::get('index'))));
+				}
+				break;
+			case 'import-group':
+				if (\Input::get('group')) {
+					die(json_encode($this->importDoNextGroupAction(\Input::get('group'))));
 				}
 				break;
 		}
@@ -1711,6 +2289,7 @@ class Backup extends \BackendModule {
 		$this->Template->referer = \Input::get('ref');
 		$this->Template->exportReady = $this->checkExportFile();
 		$this->Template->importReady = $this->checkImportFile();
+		$this->Template->importAnalysis = $this->importGrabAnalysis();
 
 		if ($this->Template->importReady['ts']) {
 			$this->Template->importReadyMoment = sprintf(

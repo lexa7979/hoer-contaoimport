@@ -59,8 +59,8 @@
 			}
 			if ($this->importReady['ts']) {
 				echo '		<p title="' . date('r', $this->importReady['ts']) . '">';
-				if ($this->importReady['file']) {
-					echo sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp'], $this->importReadyMoment, $this->importReady['file']);
+				if ($this->importReady['name']) {
+					echo sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp'], $this->importReadyMoment, $this->importReady['name']);
 				}
 				else {
 					echo sprintf($GLOBALS['TL_LANG']['tl_isobackup']['import-timestamp-noname'], $this->importReadyMoment);
@@ -73,8 +73,70 @@
 ?>
 	</div>
 <?php if ($this->importReady['success']): ?>
+<?php if (!$this->importAnalysis): ?>
 	<div class="analysis" id="tl_isobackup_analysis">
 		<div class="messages"><?= $GLOBALS['TL_LANG']['tl_isobackup']['analysis-empty'] ?></div>
 	</div>
+<?php else: ?>
+	<div id="tl_isobackup_changes">
+		<h2>Change Contao-data</h2>
+<?php		$groups = [];
+			foreach ($this->importAnalysis as $item) {
+				foreach ($item['actions']['supported'] as $action) {
+					// $s = preg_replace('/\W/', '_', $action['group']);
+					if ($action['status'] == 'prepared') {
+						$groups[$action['group']] = (array_key_exists($action['group'], $groups)) ? $groups[$action['group']] + 1 : 1;
+					}
+				}
+			}
+			foreach ($groups as $key => $amount) {
+				$groups[$key] = "<button id=\"isobackup_updatebutton_$key\" onclick=\"isobackup_update_group('$key',$amount);\">UPDATE category '$key' ($amount changes)</button>";
+			}
+			echo '<div class="group-updates">' . implode('&nbsp;&nbsp; ', $groups) . '</div>';
+?>
+		<table>
+			<thead>
+				<tr>
+					<th>Import-Item</th>
+					<th>Category</th>
+					<th>Description</th>
+					<th>Action</th>
+				</tr>
+			</thead>
+			<tbody>
+<?php		// echo print_r($this->importAnalysis[0]);
+			$indent = "				";
+			foreach ($this->importAnalysis as $item) {
+				$title = substr($item['import_id'], 0, 6) == 'alias:' ? substr($item['import_id'], 6) : $item['import_id'];
+				foreach ($item['actions']['supported'] as $index => $action) {
+					$description = sprintf(...$action['text']);
+					echo "$indent<tr>\n";
+					if ($index == 0) {
+						echo "$indent	<td valign=\"top\" rowspan=\"" . count($item['actions']['supported']) . "\">$title</td>\n";
+					}
+					echo "$indent	<td valign=\"top\">{$action['group']}</td>\n";
+					echo "$indent	<td valign=\"top\">$description</td>\n";
+					switch ($action['status']) {
+						case 'prepared':
+							echo "$indent	<td valign=\"top\"><button id=\"isobackup_updatebutton_{$item['id']}_$index\" onclick=\"isobackup_update({$item['id']},$index);\">UPDATE</button></td>\n";
+							break;
+						case 'done':
+							echo "$indent	<td valign=\"top\" class=\"done\">Done</td>\n";
+							break;
+						case 'failed':
+							echo "$indent	<td valign=\"top\" class=\"error\" title=\"{$action['error']}}\">Failed</td>\n";
+							break;
+					}
+					// echo "$indent	<td valign=\"top\"><button id=\"isobackup_updatebutton_{$item['id']}_$index\" onclick=\"isobackup_update({$item['id']},$index);\">UPDATE</button></td>\n";
+					echo "$indent</tr>\n";
+				}
+				// echo "<p>item: {$item['import_id']}<br />" . count($item['actions']['supported']) . " supported actions, " . count($item['actions']['unsupported']) . " unsupported actions</p>";
+			}
+?>
+<?php //print_r($this->importAnalysis); ?>
+			</tbody>
+		</table>
+	</div>
+<?php endif ?>
 <?php endif ?>
 </div>

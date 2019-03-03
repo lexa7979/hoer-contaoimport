@@ -74,3 +74,37 @@
 /* #tl_isobackup_analysis .progressbar + .messages {
 	margin-top: 10px;
 } */
+
+#tl_isobackup_changes .group-updates {
+	margin-top: 5px;
+	padding: 2px;
+	display: flex;
+	flex-flow: column nowrap;
+	align-items: center;
+}
+
+#tl_isobackup_changes .group-updates .busy {
+	background: orange;
+}
+
+#tl_isobackup_changes > table {
+	margin-top: 5px;
+}
+
+#tl_isobackup_changes > table th {
+	padding: 2px;
+}
+
+#tl_isobackup_changes > table td {
+	padding: 2px;
+}
+
+#tl_isobackup_changes ins {
+	background: green;
+	color: yellow;
+}
+
+#tl_isobackup_changes del {
+	background: gray;
+	color: white;
+}
